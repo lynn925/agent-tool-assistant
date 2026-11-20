@@ -11,7 +11,7 @@
 |---|---|---|
 | M1 | 脚手架（FastAPI + Next.js + shadcn/ui） | ✅ 已完成 |
 | M2 | OpenAI Function Calling 三工具（天气/搜索/计算器） | ✅ 已完成 |
-| M3 | LangGraph 多步任务编排 | ⏳ |
+| M3 | LangGraph 多步任务编排 | ✅ 已完成 |
 | M4 | 记忆（Checkpointer） | ⏳ |
 | M5 | 错误恢复（重试） | ⏳ |
 | M6 | UI 完善（不含部署） | ⏳ |
@@ -315,6 +315,54 @@ interface TaskStep {
 
 ## 11. 待确认（开始 M2 前）
 
-1. **SSE 事件协议** 是否照第 4 节清单实现？
+1. **SSE 事件协议** 是否照第 4 节清单实现？ → 已按第 4 节实现
 2. **planner JSON 强约束**：用 OpenAI `response_format`（稳）还是仅 prompt（省 token）？
-3. **M3 单步失败**：当前「跳过继续」 vs 「终止整 plan」？
+   → 已用 `response_format={"type": "json_object"}`，实测 3/3 可解析
+3. **M3 单步失败**：当前「跳过继续」 vs 「终止整 plan」？ → 已选「跳过继续」
+
+---
+
+## 12. M3 实施补充（M2 → M3 的变更）
+
+### 12.1 与原计划的三处偏差
+
+| 项 | 原计划 | 实际实现 | 原因 |
+|---|---|---|---|
+| executor 执行方式 | 计划里带 tool+args，executor 执行 | 同上，但**参数名按工具 schema 自动归一化** | 实测 planner 会把 `city` 写成 `location` |
+| 流式模式 | 未明确 | 只用 `stream_mode="custom"` | `"messages"` 模式会把 planner 的 JSON 也当正文推给前端 |
+| 正文来源 | aggregator 产出 final_answer | aggregator 内部 `astream` 逐 token 推 `delta` 事件 | 避免混流，正文只来自汇总器 |
+
+### 12.2 新增事件
+
+| event | data | 含义 |
+|---|---|---|
+| `plan_update` | `{plan: TaskStep[]}` | planner 生成的完整计划 |
+| `step_update` | `{id, status, description, tool}` | 单步状态切换 |
+
+`tool_result` 在 M3 里结构有变：多了 `name` 和 `args`，`id` 是**步骤 ID**（`step-1`）而不是 M2 的 tool_call id。
+
+### 12.3 文件结构变化
+
+```
+backend/app/agent/
+├── state.py       # 扩展：TaskStep / plan / current_step / final_answer
+├── prompts.py     # 新增：PLANNER_PROMPT / AGGREGATOR_PROMPT
+├── nodes.py       # 新增：planner / executor / aggregator
+├── text.py        # 新增：ThinkFilter（从 api/chat.py 抽出）
+└── graph.py       # 改为 M3 图结构
+
+frontend/components/chat/
+└── PlanPanel.tsx  # 新增：任务计划面板
+```
+
+### 12.4 参数名归一化
+
+planner 输出的参数名不可信，executor 执行前会按工具 schema 校正：
+
+| 别名 | 修正为 |
+|---|---|
+| `location` / `place` / `city_name` | `city` |
+| `keyword` / `q` / `search` | `query` |
+| `expr` / `formula` / `text` | `expression` |
+
+不在白名单里的参数会被直接丢弃，避免传给工具时报错。

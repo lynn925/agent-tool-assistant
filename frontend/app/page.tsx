@@ -11,6 +11,7 @@ import { chatStream } from "@/lib/api";
 import { getThreadId } from "@/lib/thread";
 import type { ChatMessage, ToolCall } from "@/lib/types";
 
+/** 消息 ID 自增序号，保证同一页面内 ID 不重复 */
 let messageSeq = 0;
 function nextId(prefix: string): string {
   messageSeq += 1;
@@ -18,12 +19,22 @@ function nextId(prefix: string): string {
 }
 
 export default function HomePage() {
+  /** 聊天消息列表 */
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  /** 输入框内容 */
   const [draft, setDraft] = useState("");
+  /** 是否正在等待后端响应 */
   const [sending, setSending] = useState(false);
+  /** 顶层错误提示（比如后端连不上） */
   const [error, setError] = useState<string | null>(null);
+  /** 中止控制器，用于实现"停止"按钮 */
   const abortRef = useRef<AbortController | null>(null);
 
+  /**
+   * 更新指定助手消息。
+   *
+   * 所有流式事件最终都汇聚到这里：把 messages 数组里 id 匹配的那条替换掉。
+   */
   function updateAssistant(
     assistantId: string,
     fn: (msg: ChatMessage) => ChatMessage,
@@ -33,12 +44,14 @@ export default function HomePage() {
     );
   }
 
+  /** 发送消息 */
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     const text = draft.trim();
     if (!text || sending) return;
 
     setError(null);
+    // 先把用户消息和一条空的助手消息占位放进列表
     const userMsg: ChatMessage = {
       id: nextId("user"),
       role: "user",
@@ -60,10 +73,12 @@ export default function HomePage() {
     abortRef.current = controller;
 
     try {
+      // 建立 SSE 连接，把事件分发到状态更新
       await chatStream(text, getThreadId(), {
         signal: controller.signal,
         onEvent: (event) => {
           switch (event.event) {
+            // 文本片段：追加到消息末尾
             case "content_delta": {
               const delta = event.data.delta;
               updateAssistant(assistantId, (msg) => ({
@@ -72,35 +87,62 @@ export default function HomePage() {
               }));
               break;
             }
-            case "tool_call": {
-              const { id, name, args } = event.data;
+
+            // M3：完整计划，渲染计划面板
+            case "plan_update": {
+              const plan = event.data.plan;
               updateAssistant(assistantId, (msg) => ({
                 ...msg,
-                toolCalls: [
-                  ...msg.toolCalls,
-                  { id, name, args, status: "running" } satisfies ToolCall,
-                ],
+                plan,
               }));
               break;
             }
-            case "tool_result": {
-              const { id, ok, result, error: toolError, latency_ms } = event.data;
+
+            // M3：单步状态变化，更新计划面板里的对应步骤
+            case "step_update": {
+              const { id, status, description, tool } = event.data;
               updateAssistant(assistantId, (msg) => ({
                 ...msg,
-                toolCalls: msg.toolCalls.map((call) =>
-                  call.id === id
-                    ? {
-                        ...call,
-                        status: ok ? "ok" : "failed",
-                        result,
-                        error: toolError,
-                        latencyMs: latency_ms,
-                      }
-                    : call,
+                plan: (msg.plan ?? []).map((step) =>
+                  step.id === id
+                    ? { ...step, status, description, tool: tool ?? undefined }
+                    : step,
                 ),
               }));
               break;
             }
+
+            // M3：工具执行回执。
+            // 注意 id 是步骤 ID（step-1 之类），不是 M2 的 tool_call id。
+            case "tool_result": {
+              const {
+                id,
+                name,
+                args,
+                ok,
+                result,
+                error: toolError,
+                latency_ms,
+              } = event.data;
+              updateAssistant(assistantId, (msg) => ({
+                ...msg,
+                toolCalls: [
+                  ...msg.toolCalls,
+                  {
+                    id,
+                    name,
+                    args: args ?? {},
+                    status: ok ? "ok" : "failed",
+                    result,
+                    error: toolError ?? undefined,
+                    latencyMs: latency_ms,
+                  } satisfies ToolCall,
+                ],
+              }));
+              break;
+            }
+
+            // 全局错误：挂到消息上
             case "error": {
               const { code, message } = event.data;
               updateAssistant(assistantId, (msg) => ({
@@ -109,6 +151,7 @@ export default function HomePage() {
               }));
               break;
             }
+
             default:
               break;
           }
@@ -116,7 +159,7 @@ export default function HomePage() {
       });
     } catch (err) {
       if (controller.signal.aborted) {
-        // user cancelled — drop the empty bubble
+        // 用户点了"停止"，删掉那条空的助手消息
         setMessages((prev) => prev.filter((m) => m.id !== assistantId));
       } else {
         const msg = err instanceof Error ? err.message : String(err);
@@ -128,6 +171,7 @@ export default function HomePage() {
     }
   }
 
+  /** 中断当前请求 */
   function onStop() {
     abortRef.current?.abort();
   }
@@ -137,7 +181,7 @@ export default function HomePage() {
       <header className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold">Agent Tool Assistant</h1>
         <p className="text-sm text-muted-foreground">
-          M2 · LangGraph 工具调用（天气 / 搜索 / 计算器）+ SSE 流式输出。
+          M3 · LangGraph 多步任务编排：先规划步骤，再逐步执行，最后汇总。
         </p>
       </header>
 
@@ -159,10 +203,12 @@ export default function HomePage() {
         </CardContent>
       </Card>
 
+      {/* 顶层错误提示 */}
       {error ? (
         <p className="text-sm text-destructive">{error}</p>
       ) : null}
 
+      {/* 输入区 */}
       <form onSubmit={onSubmit} className="flex gap-2">
         <Input
           value={draft}
@@ -171,6 +217,7 @@ export default function HomePage() {
           disabled={sending}
           autoFocus
         />
+        {/* 发送中就换成"停止"按钮 */}
         {sending ? (
           <Button type="button" variant="outline" onClick={onStop}>
             停止

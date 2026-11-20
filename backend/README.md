@@ -25,8 +25,11 @@ app/
 │   ├── echo.py      # /api/echo（调试用）
 │   └── chat.py      # /api/chat（SSE）
 ├── agent/
-│   ├── state.py     # AgentState
-│   ├── graph.py     # call_model ⇄ tools 图
+│   ├── state.py     # AgentState + TaskStep
+│   ├── prompts.py   # planner / aggregator 提示词
+│   ├── nodes.py     # planner / executor / aggregator
+│   ├── text.py      # ThinkFilter（剥离推理块）
+│   ├── graph.py     # M3 图结构
 │   └── tools/
 │       ├── weather.py    # get_weather(city)
 │       ├── search.py     # web_search(query, num)
@@ -38,4 +41,5 @@ app/
 
 - **M1**：FastAPI 骨架 + CORS + /api/health + /api/echo
 - **M2**：三工具（天气/搜索/计算器）+ `bind_tools`/`ToolNode` + SSE 流式
-- M3 起做多步任务编排与记忆
+- **M3**：多步任务编排（planner → executor → aggregator）+ 计划面板
+- M4 起做记忆持久化

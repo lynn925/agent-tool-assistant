@@ -1,57 +1,53 @@
-"""LangGraph agent graph — M2 version with tool calling.
+"""LangGraph 智能体图 —— M3 版本，支持多步任务编排。
 
-Graph shape: START → call_model → (tools? → call_model)* → END
-The `tools` node is LangGraph's prebuilt `ToolNode`, which executes the
-tool calls the model requested and returns their results as ToolMessages.
+图结构：
+    START → planner → executor → (还有下一步吗？)
+                              ├── 有 → executor
+                              └── 无 → aggregator → END
+
+与 M2 的区别：
+    M2 是模型自主选工具（call_model ⇄ tools 闭环）；
+    M3 是先生成计划，再按计划逐步执行，最后汇总。
+
+注意：节点里用 get_stream_writer() 推的自定义事件，
+需要用 graph.astream(..., stream_mode="custom") 才能收到。
 """
 
 from functools import lru_cache
 
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
 
+from app.agent.nodes import (
+    aggregator_node,
+    executor_node,
+    planner_node,
+    should_continue,
+)
 from app.agent.state import AgentState
-from app.agent.tools import ALL_TOOLS
-from app.config import get_settings
-
-
-@lru_cache
-def _model() -> ChatOpenAI:
-    s = get_settings()
-    return ChatOpenAI(
-        model=s.openai_model,
-        api_key=s.openai_api_key or None,
-        base_url=s.openai_base_url or None,
-        temperature=0.2,
-    )
-
-
-async def call_model(state: AgentState) -> dict:
-    """Call the LLM with the three M2 tools bound."""
-    response = await _model().bind_tools(ALL_TOOLS).ainvoke(state["messages"])
-    return {"messages": [response]}
-
-
-def _should_call_tools(state: AgentState) -> str:
-    """Route to the tool node when the model asked for tool calls."""
-    last = state["messages"][-1]
-    if getattr(last, "tool_calls", None):
-        return "tools"
-    return END
 
 
 @lru_cache
 def build_graph():
-    """Compile the M2 graph: START → call_model → tools → call_model → END."""
+    """编译并缓存整张图。
+
+    用 lru_cache 是因为编译一次就够，避免每次请求都重建。
+    M4 加 checkpointer 时这里会变成 build_graph(checkpointer=...)，
+    届时缓存键也要跟着调整。
+    """
     g = StateGraph(AgentState)
-    g.add_node("call_model", call_model)
-    g.add_node("tools", ToolNode(ALL_TOOLS))
-    g.add_edge(START, "call_model")
+    g.add_node("planner", planner_node)
+    g.add_node("executor", executor_node)
+    g.add_node("aggregator", aggregator_node)
+
+    g.add_edge(START, "planner")
+    g.add_edge("planner", "executor")
+
+    # 条件边：还有步骤没执行完就回到 executor，否则去汇总
     g.add_conditional_edges(
-        "call_model",
-        _should_call_tools,
-        {"tools": "tools", END: END},
+        "executor",
+        should_continue,
+        {"executor": "executor", "aggregator": "aggregator"},
     )
-    g.add_edge("tools", "call_model")
+
+    g.add_edge("aggregator", END)
     return g.compile()
