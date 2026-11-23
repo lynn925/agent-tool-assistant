@@ -1,16 +1,13 @@
-"""LangGraph 智能体图 —— M3 版本，支持多步任务编排。
+"""LangGraph 智能体图 —— M4 版本，支持记忆持久化。
 
 图结构：
     START → planner → executor → (还有下一步吗？)
                               ├── 有 → executor
                               └── 无 → aggregator → END
 
-与 M2 的区别：
-    M2 是模型自主选工具（call_model ⇄ tools 闭环）；
-    M3 是先生成计划，再按计划逐步执行，最后汇总。
-
-注意：节点里用 get_stream_writer() 推的自定义事件，
-需要用 graph.astream(..., stream_mode="custom") 才能收到。
+M4 的变化：编译时传入 checkpointer，图会把每个 thread_id 的状态存进 SQLite。
+调用时通过 config={"configurable": {"thread_id": ...}} 指定会话，
+不同会话的状态互相隔离。
 """
 
 from functools import lru_cache
@@ -28,12 +25,26 @@ from app.agent.state import AgentState
 
 @lru_cache
 def build_graph():
-    """编译并缓存整张图。
+    """编译并缓存整张图（不带 checkpointer）。
 
-    用 lru_cache 是因为编译一次就够，避免每次请求都重建。
-    M4 加 checkpointer 时这里会变成 build_graph(checkpointer=...)，
-    届时缓存键也要跟着调整。
+    M4 增加了带 checkpointer 的 build_graph_with_memory()，
+    两者缓存键不同，互不影响。
     """
+    return _compile(None)
+
+
+@lru_cache
+def build_graph_with_memory(checkpointer):
+    """编译带 checkpointer 的图。
+
+    参数 checkpointer 参与 lru_cache 的缓存键，
+    所以同一个 saver 只会编译一次。
+    """
+    return _compile(checkpointer)
+
+
+def _compile(checkpointer):
+    """实际的编译逻辑，两个入口共用。"""
     g = StateGraph(AgentState)
     g.add_node("planner", planner_node)
     g.add_node("executor", executor_node)
@@ -50,4 +61,5 @@ def build_graph():
     )
 
     g.add_edge("aggregator", END)
-    return g.compile()
+    # 传 checkpointer 就会持久化每个 thread 的状态
+    return g.compile(checkpointer=checkpointer)

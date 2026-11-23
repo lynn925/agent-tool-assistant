@@ -39,7 +39,8 @@ def test_chat_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.config import get_settings
 
     monkeypatch.setattr(get_settings(), "openai_api_key", "", raising=False)
-    r = client.post("/api/chat", json={"message": "hi"})
+    # M4 起 thread_id 必传
+    r = client.post("/api/chat", json={"message": "hi", "thread_id": "test-thread"})
     assert r.status_code == 503
 
 

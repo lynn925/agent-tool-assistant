@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # CORS
     frontend_origin: str = "http://localhost:3000"
 
+    # M4 记忆持久化：SQLite 数据库文件路径
+    checkpoint_db_path: str = "data/checkpoints.db"
+
 
 @lru_cache
 def get_settings() -> Settings:

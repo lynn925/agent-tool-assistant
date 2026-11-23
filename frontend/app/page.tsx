@@ -1,14 +1,22 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { MessageBubble } from "@/components/chat/MessageBubble";
+import { ThreadSwitcher } from "@/components/chat/ThreadSwitcher";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { chatStream } from "@/lib/api";
-import { getThreadId } from "@/lib/thread";
+import { chatStream, clearMemory, getMemory } from "@/lib/api";
+import {
+  type LocalThread,
+  createThread,
+  getThreadId,
+  listLocalThreads,
+  setThreadId,
+  touchThread,
+} from "@/lib/thread";
 import type { ChatMessage, ToolCall } from "@/lib/types";
 
 /** 消息 ID 自增序号，保证同一页面内 ID 不重复 */
@@ -29,6 +37,49 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
   /** 中止控制器，用于实现"停止"按钮 */
   const abortRef = useRef<AbortController | null>(null);
+  /** 当前会话 ID */
+  const [threadId, setThreadIdState] = useState("");
+  /** 会话列表 */
+  const [threads, setThreads] = useState<LocalThread[]>([]);
+  /** 清空记忆进行中 */
+  const [clearing, setClearing] = useState(false);
+
+  /**
+   * 首次挂载：读出当前会话，加载它的历史消息。
+   */
+  useEffect(() => {
+    const id = getThreadId();
+    setThreadIdState(id);
+    setThreads(listLocalThreads());
+    void loadHistory(id);
+  }, []);
+
+  /**
+   * 加载某个会话的历史消息。
+   *
+   * 后端存的是纯文本消息（user/assistant），
+   * 工具调用和计划面板的历史不恢复 —— 那部分是过程数据。
+   */
+  async function loadHistory(id: string) {
+    try {
+      const { messages: history } = await getMemory(id);
+      if (history.length === 0) {
+        setMessages([]);
+        return;
+      }
+      setMessages(
+        history.map((m) => ({
+          id: nextId(m.role),
+          role: m.role,
+          text: m.text,
+          toolCalls: [],
+        })),
+      );
+    } catch {
+      // 后端不可达时静默失败，页面照常能用
+      setMessages([]);
+    }
+  }
 
   /**
    * 更新指定助手消息。
@@ -74,7 +125,7 @@ export default function HomePage() {
 
     try {
       // 建立 SSE 连接，把事件分发到状态更新
-      await chatStream(text, getThreadId(), {
+      await chatStream(text, threadId, {
         signal: controller.signal,
         onEvent: (event) => {
           switch (event.event) {
@@ -157,6 +208,9 @@ export default function HomePage() {
           }
         },
       });
+      // 这次对话已经进了后端记忆，把它记到本地列表
+      touchThread(threadId);
+      setThreads(listLocalThreads());
     } catch (err) {
       if (controller.signal.aborted) {
         // 用户点了"停止"，删掉那条空的助手消息
@@ -176,13 +230,53 @@ export default function HomePage() {
     abortRef.current?.abort();
   }
 
+  /** 切换会话 */
+  function onSwitch(id: string) {
+    setThreadId(id);
+    setThreadIdState(id);
+    void loadHistory(id);
+  }
+
+  /** 新建会话 */
+  function onCreate() {
+    const id = createThread();
+    setThreadIdState(id);
+    setMessages([]);
+    setThreads(listLocalThreads());
+  }
+
+  /** 清空当前会话的记忆 */
+  async function onClear() {
+    setClearing(true);
+    setError(null);
+    try {
+      await clearMemory(threadId);
+      setMessages([]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(`清空失败：${msg}`);
+    } finally {
+      setClearing(false);
+    }
+  }
+
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-4 px-4 py-8">
-      <header className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold">Agent Tool Assistant</h1>
-        <p className="text-sm text-muted-foreground">
-          M3 · LangGraph 多步任务编排：先规划步骤，再逐步执行，最后汇总。
-        </p>
+      <header className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl font-semibold">Agent Tool Assistant</h1>
+          <p className="text-sm text-muted-foreground">
+            M4 · 多步任务编排 + 会话记忆持久化。
+          </p>
+        </div>
+        <ThreadSwitcher
+          threads={threads}
+          currentId={threadId}
+          onSwitch={onSwitch}
+          onCreate={onCreate}
+          onClear={onClear}
+          busy={clearing}
+        />
       </header>
 
       <Card className="flex-1">

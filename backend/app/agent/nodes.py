@@ -21,7 +21,7 @@ from langgraph.config import get_stream_writer
 
 from app.agent.prompts import AGGREGATOR_PROMPT, PLANNER_PROMPT
 from app.agent.state import AgentState, TaskStep
-from app.agent.text import ThinkFilter, strip_think
+from app.agent.text import ThinkFilter, extract_conversation, strip_think
 from app.agent.tools import ALL_TOOLS, LATENCY_KEY
 from app.config import get_settings
 
@@ -132,19 +132,21 @@ async def planner_node(state: AgentState) -> dict:
     """规划节点：把用户请求拆成 2~5 个步骤。
 
     输出：plan（步骤列表）和 current_step=0
+
+    M4 变化：会带上历史对话，让 planner 能理解上下文指代
+    （比如"再算一下"要知道在算什么）。
     """
     writer = get_stream_writer()
-    user_text = ""
-    for msg in state["messages"]:
-        if isinstance(msg, HumanMessage):
-            user_text = msg.content if isinstance(msg.content, str) else ""
+    user_text, history = extract_conversation(state["messages"])
     user_text = user_text or "请帮我完成这个任务"
 
+    # 消息列表：系统提示 → 历史对话 → 当前问题
+    payload_messages = [{"role": "system", "content": PLANNER_PROMPT}]
+    payload_messages.extend(history)
+    payload_messages.append({"role": "user", "content": user_text})
+
     response = await _model().ainvoke(
-        [
-            {"role": "system", "content": PLANNER_PROMPT},
-            {"role": "user", "content": user_text},
-        ],
+        payload_messages,
         response_format={"type": "json_object"},
     )
 
@@ -255,6 +257,10 @@ async def aggregator_node(state: AgentState) -> dict:
 
     这里用 astream 做 token 级推送 —— 模型生成一段就推一段，
     前端能实时看到打字效果。
+
+    M4 变化：会带上历史对话。
+    这是记忆能生效的关键 —— 之前只把当前问题给了模型，
+    "我叫小明"这类信息传不下去，模型就会说"我不知道你的名字"。
     """
     writer = get_stream_writer()
     plan = state.get("plan") or []
@@ -271,25 +277,25 @@ async def aggregator_node(state: AgentState) -> dict:
         else:
             lines.append(f"- {desc}：{status}")
 
-    # 用户的原始问题
-    user_text = ""
-    for msg in state["messages"]:
-        if isinstance(msg, HumanMessage):
-            user_text = msg.content if isinstance(msg.content, str) else ""
+    # 当前问题 + 历史对话
+    user_text, history = extract_conversation(state["messages"])
+    user_text = user_text or "请帮我完成这个任务"
 
     context = "\n".join(lines) if lines else "（没有执行任何步骤）"
+
+    # 消息列表：系统提示 → 历史对话 → 当前问题 + 执行结果
+    payload_messages = [{"role": "system", "content": AGGREGATOR_PROMPT}]
+    payload_messages.extend(history)
+    payload_messages.append(
+        {"role": "user", "content": f"用户的问题：{user_text}\n\n执行结果：\n{context}"}
+    )
 
     model = _model()
     think = ThinkFilter()
     answer_parts: list[str] = []
 
     # 逐 token 消费模型输出，边过滤推理块边推给前端
-    async for chunk in model.astream(
-        [
-            {"role": "system", "content": AGGREGATOR_PROMPT},
-            {"role": "user", "content": f"用户的问题：{user_text}\n\n执行结果：\n{context}"},
-        ]
-    ):
+    async for chunk in model.astream(payload_messages):
         text = chunk.content if isinstance(chunk.content, str) else ""
         if not text:
             continue

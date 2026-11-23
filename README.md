@@ -7,7 +7,7 @@
 | M1 | 脚手架（FastAPI + Next.js + LangGraph） | ✅ 已完成 |
 | M2 | OpenAI Function Calling 三工具（天气/搜索/计算器） | ✅ 已完成 |
 | M3 | LangGraph 多步任务编排 | ✅ 已完成 |
-| M4 | 记忆（Checkpointer） | ⏳ |
+| M4 | 记忆（Checkpointer） | ✅ 已完成 |
 | M5 | 错误恢复（重试） | ⏳ |
 | M6 | UI 完善 + 部署文档 | ⏳ |
 
@@ -51,7 +51,7 @@ npm run dev
 - 前端：http://localhost:3000
 - 后端：http://localhost:8000/docs（FastAPI Swagger）
 
-## 当前进度（M3）
+## 当前进度（M4）
 
 - ✅ 根 monorepo 配置
 - ✅ 后端 FastAPI 脚手架（CORS + /api/health）
@@ -61,7 +61,9 @@ npm run dev
 - ✅ SSE 流式输出（`message_start` / `plan_update` / `step_update` / `content_delta` / `tool_result` / `message_end` / `error`）
 - ✅ 多步任务编排：planner 规划 → executor 逐步执行 → aggregator 汇总
 - ✅ 前端计划面板 + 工具调用卡片（可展开看参数与结果、显示耗时与失败状态）
-- ⏳ M4 起做记忆持久化
+- ✅ 记忆持久化：SQLite checkpointer，多会话隔离
+- ✅ 前端会话切换（新建 / 切换 / 清空）+ 历史消息加载
+- ⏳ M5 起做错误恢复
 
 ### M3 的执行流程
 
@@ -74,6 +76,31 @@ executor   按计划逐个调用工具
   ↓          某步失败 → 标记 skipped，继续下一步
 aggregator 汇总所有步骤结果 → 最终答案
 ```
+
+### M4 的记忆机制
+
+```
+/api/chat  {message, thread_id}
+  ↓
+graph.astream(config={"configurable": {"thread_id": ...}})
+  ↓
+SqliteSaver 读写 data/checkpoints.db
+  ↓
+下一轮同 thread_id 时，历史消息自动带入提示词
+```
+
+**关键点**：光有 checkpointer 不够 —— planner 和 aggregator 都必须把**历史对话**放进提示词，
+否则模型看不到之前聊过什么（"我叫小明"就传不下去）。
+这个逻辑在 [text.py](file:///Users/xinao/Desktop/ai-project/agent-tool-assistant/backend/app/agent/text.py) 的 `extract_conversation`。
+
+### 记忆相关接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/chat` | `thread_id` 必传 |
+| GET | `/api/memory/{thread_id}` | 读取会话历史消息 |
+| DELETE | `/api/memory/{thread_id}` | 清空会话记忆 |
+| GET | `/api/threads` | 列出所有会话 |
 
 ### 工具契约
 

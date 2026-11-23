@@ -150,3 +150,43 @@ function parseFrame(frame: string): ChatEvent | null {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// M4 记忆接口
+// ---------------------------------------------------------------------------
+
+/** 后端保存的历史消息 */
+export interface HistoryMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+/** 会话摘要信息 */
+export interface ThreadInfo {
+  thread_id: string;
+  /** 最后活跃时间（ISO 8601） */
+  updated_at: string | null;
+  /** 消息条数 */
+  message_count: number;
+}
+
+/** 读取某个会话的历史消息 */
+export async function getMemory(
+  threadId: string,
+): Promise<{ thread_id: string; messages: HistoryMessage[] }> {
+  return request(`/api/memory/${encodeURIComponent(threadId)}`);
+}
+
+/** 清空某个会话的记忆 */
+export async function clearMemory(
+  threadId: string,
+): Promise<{ thread_id: string; cleared: boolean }> {
+  return request(`/api/memory/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+  });
+}
+
+/** 列出所有会话 */
+export async function listThreads(): Promise<{ threads: ThreadInfo[] }> {
+  return request("/api/threads");
+}

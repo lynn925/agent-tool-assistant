@@ -1,9 +1,13 @@
 """文本流处理工具。
 
-核心是 ThinkFilter —— 过滤掉模型输出里的 <think>...</think> 推理块。
+包含两部分：
+  1. ThinkFilter —— 过滤掉模型输出里的 <think>...</think> 推理块
+  2. 历史对话提取 —— M4 记忆功能需要把历史带进提示词
 """
 
 import re
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 #: 推理块标签。MiniMax 这类模型会把思考过程混在正文里输出。
 _THINK_OPEN = "<think>"
@@ -77,3 +81,38 @@ class ThinkFilter:
 def strip_think(text: str) -> str:
     """一次性剥掉完整文本里的推理块（用于非流式场景）。"""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+
+
+def extract_conversation(messages: list[BaseMessage]) -> tuple[str, list[dict]]:
+    """从 state 的消息列表里提取（当前问题, 历史对话）。
+
+    M4 记忆的关键：只把"最后一条用户消息"当当前问题是错的 ——
+    那样模型看不到之前聊过什么，"我叫小明"这种信息就传不下去。
+
+    所以这里返回两部分：
+      current   最后一条用户消息（当前这轮的问题）
+      history   之前所有轮次（用户+助手），转成 OpenAI 格式的 messages
+
+    最后一条助手消息不包含在 history 里 —— 那是本轮 aggregator 要生成的。
+    """
+    human_texts: list[str] = []
+    history: list[dict] = []
+
+    for msg in messages:
+        text = msg.content if isinstance(msg.content, str) else ""
+        if isinstance(msg, HumanMessage):
+            human_texts.append(text)
+            history.append({"role": "user", "content": text})
+        elif isinstance(msg, AIMessage):
+            # 跳过空内容的助手消息（比如只有 tool_calls 的那轮）
+            if text.strip():
+                history.append({"role": "assistant", "content": text})
+
+    current = human_texts[-1] if human_texts else ""
+
+    # 把最后一条用户消息从历史里摘掉，避免和 current 重复
+    # （历史末尾是 assistant 时摘不掉，交给调用方判断）
+    if history and history[-1]["role"] == "user" and history[-1]["content"] == current:
+        history = history[:-1]
+
+    return current, history

@@ -23,7 +23,8 @@ from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from app.agent.graph import build_graph
+from app.agent.checkpointer import get_checkpointer
+from app.agent.graph import build_graph_with_memory
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -33,8 +34,9 @@ RECURSION_LIMIT = 50
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
-    # M4 会真正用它做记忆持久化，M3 只是原样回传
-    thread_id: str | None = None
+    #: 会话 ID。M4 起必传 —— 它决定读写哪个会话的记忆。
+    #: 传空字符串会返回 400。
+    thread_id: str = Field(..., min_length=1, max_length=100)
 
 
 def _sse(event: str, data: dict) -> dict:
@@ -74,18 +76,26 @@ async def _stream_events(user_message: str, thread_id: str) -> AsyncIterator[dic
     为什么不用 "messages" 模式：
       它会把 planner 的 JSON 输出也当成正文推给前端。
       M3 的正文只来自 aggregator，所以在节点内部自己 astream 更可控。
+
+    M4 的变化：图带上了 checkpointer，config 里指定 thread_id，
+    于是这个会话的历史消息会被自动带上，模型能记住之前聊过什么。
     """
     message_id = str(uuid.uuid4())
     # 第一条事件：告诉前端"助手消息开始了"
     yield _sse("message_start", {"id": message_id, "role": "assistant", "thread_id": thread_id})
 
-    graph = build_graph()
+    checkpointer = await get_checkpointer()
+    graph = build_graph_with_memory(checkpointer)
 
     try:
         async for chunk in graph.astream(
             {"messages": [HumanMessage(content=user_message)]},
             stream_mode="custom",
-            config={"recursion_limit": RECURSION_LIMIT},
+            config={
+                "recursion_limit": RECURSION_LIMIT,
+                # thread_id 决定这次对话读写哪个会话的记忆
+                "configurable": {"thread_id": thread_id},
+            },
         ):
             if not isinstance(chunk, dict):
                 continue
@@ -154,8 +164,7 @@ async def chat(req: ChatRequest) -> EventSourceResponse:
             detail="OPENAI_API_KEY 未配置；请在 backend/.env 设置后重启。",
         )
 
-    thread_id = req.thread_id or "m1-default"
     return EventSourceResponse(
-        _stream_events(req.message, thread_id),
+        _stream_events(req.message, req.thread_id),
         media_type="text/event-stream",
     )

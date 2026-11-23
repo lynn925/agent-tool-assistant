@@ -12,7 +12,7 @@
 | M1 | 脚手架（FastAPI + Next.js + shadcn/ui） | ✅ 已完成 |
 | M2 | OpenAI Function Calling 三工具（天气/搜索/计算器） | ✅ 已完成 |
 | M3 | LangGraph 多步任务编排 | ✅ 已完成 |
-| M4 | 记忆（Checkpointer） | ⏳ |
+| M4 | 记忆（Checkpointer） | ✅ 已完成 |
 | M5 | 错误恢复（重试） | ⏳ |
 | M6 | UI 完善（不含部署） | ⏳ |
 
@@ -366,3 +366,47 @@ planner 输出的参数名不可信，executor 执行前会按工具 schema 校�
 | `expr` / `formula` / `text` | `expression` |
 
 不在白名单里的参数会被直接丢弃，避免传给工具时报错。
+
+---
+
+## 13. M4 实施补充（M3 → M4 的变更）
+
+### 13.1 关键实现要点
+
+**checkpointer 必须在整个应用生命周期内持有连接。**
+`AsyncSqliteSaver.from_conn_string` 是 async context manager，用完连接就断。
+所以 `checkpointer.py` 里自己用 `aiosqlite` 建连接再包一层，
+由 FastAPI 的 lifespan 负责开关。
+
+**光有 checkpointer 不够 —— 必须把历史放进提示词。**
+这是 M4 最大的坑：checkpointer 确实把历史消息存进了 state，
+但 planner 和 aggregator 原来都只取「最后一条 HumanMessage」，
+模型根本看不到之前聊过什么，于是回答「我不知道你的名字」。
+
+修复：新增 `text.py` 的 `extract_conversation(messages)`，
+返回 `(当前问题, 历史对话)`，planner 和 aggregator 都用它拼 messages 列表。
+
+### 13.2 与原计划的两处偏差
+
+| 项 | 原计划 | 实际实现 | 原因 |
+|---|---|---|---|
+| checkpointer 生命周期 | `AsyncSqliteSaver.from_conn_string` | 自己管 aiosqlite 连接 + lifespan | 原写法用完即断 |
+| 前端会话列表 | 后端 `/api/threads` 提供 | 后端提供接口，前端在 localStorage 另存一份 | 前端要能离线显示会话名 |
+
+### 13.3 新增文件
+
+```
+backend/app/agent/
+└── checkpointer.py   # SqliteSaver 管理 + lifespan 作用域
+
+backend/app/api/
+├── memory.py         # GET/DELETE /api/memory/{thread_id}
+└── threads.py        # GET /api/threads
+
+frontend/components/chat/
+└── ThreadSwitcher.tsx  # 会话切换器（原生 select，不新增依赖）
+```
+
+### 13.4 API 契约变更
+
+`POST /api/chat` 的 `thread_id` 从**可选**变为**必传**（缺失返回 422）。
