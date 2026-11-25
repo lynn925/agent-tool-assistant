@@ -26,6 +26,22 @@ function nextId(prefix: string): string {
   return `${prefix}-${messageSeq}`;
 }
 
+/** M5：当前正在进行的重试（没有则为 null） */
+interface RetryingState {
+  /** 出错的层：tool 工具层 / llm 模型层 */
+  layer: "tool" | "llm";
+  /** 哪一步 */
+  stage: string;
+  /** 工具名（工具层才有） */
+  name?: string;
+  /** 即将进行的第几次重试 */
+  attempt: number;
+  /** 总共最多尝试几次 */
+  maxAttempts: number;
+  /** 失败原因 */
+  message: string;
+}
+
 export default function HomePage() {
   /** 聊天消息列表 */
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -43,6 +59,8 @@ export default function HomePage() {
   const [threads, setThreads] = useState<LocalThread[]>([]);
   /** 清空记忆进行中 */
   const [clearing, setClearing] = useState(false);
+  /** M5：当前正在重试的提示 */
+  const [retrying, setRetrying] = useState<RetryingState | null>(null);
 
   /**
    * 首次挂载：读出当前会话，加载它的历史消息。
@@ -150,13 +168,22 @@ export default function HomePage() {
             }
 
             // M3：单步状态变化，更新计划面板里的对应步骤
+            // M5：error 和 retry 也要透传 —— 否则失败原因和重试次数
+            // 不会显示在计划面板里。
             case "step_update": {
-              const { id, status, description, tool } = event.data;
+              const { id, status, description, tool, error, retry } = event.data;
               updateAssistant(assistantId, (msg) => ({
                 ...msg,
                 plan: (msg.plan ?? []).map((step) =>
                   step.id === id
-                    ? { ...step, status, description, tool: tool ?? undefined }
+                    ? {
+                        ...step,
+                        status,
+                        description,
+                        tool: tool ?? undefined,
+                        error: error ?? null,
+                        retry: retry ?? step.retry,
+                      }
                     : step,
                 ),
               }));
@@ -173,6 +200,7 @@ export default function HomePage() {
                 ok,
                 result,
                 error: toolError,
+                retry,
                 latency_ms,
               } = event.data;
               updateAssistant(assistantId, (msg) => ({
@@ -186,10 +214,27 @@ export default function HomePage() {
                     status: ok ? "ok" : "failed",
                     result,
                     error: toolError ?? undefined,
+                    retry,
                     latencyMs: latency_ms,
                   } satisfies ToolCall,
                 ],
               }));
+              break;
+            }
+
+            // M5：正在重试。实时提示用户「系统在自动重试」，
+            // 而不是让用户对着一个卡住的界面干等。
+            case "retry": {
+              const { layer, stage, name, attempt, max_attempts, message } =
+                event.data;
+              setRetrying({
+                layer,
+                stage,
+                name,
+                attempt,
+                maxAttempts: max_attempts,
+                message,
+              });
               break;
             }
 
@@ -222,6 +267,8 @@ export default function HomePage() {
     } finally {
       abortRef.current = null;
       setSending(false);
+      // 重试提示只在请求期间显示，结束后清掉
+      setRetrying(null);
     }
   }
 
@@ -266,7 +313,7 @@ export default function HomePage() {
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-semibold">Agent Tool Assistant</h1>
           <p className="text-sm text-muted-foreground">
-            M4 · 多步任务编排 + 会话记忆持久化。
+            M5 · 多步任务编排 + 会话记忆 + 错误自动重试。
           </p>
         </div>
         <ThreadSwitcher
@@ -296,6 +343,17 @@ export default function HomePage() {
           </ScrollArea>
         </CardContent>
       </Card>
+
+      {/* M5：重试提示。放在消息区下方，输入框上方 —— 不打断阅读流 */}
+      {retrying ? (
+        <p className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+          {retrying.layer === "tool"
+            ? `${retrying.name ?? "工具"} 调用失败，正在重试（第 ${retrying.attempt}/${retrying.maxAttempts - 1} 次）`
+            : `模型调用失败，正在重试（第 ${retrying.attempt}/${retrying.maxAttempts - 1} 次）`}
+          ：{retrying.message}
+        </p>
+      ) : null}
 
       {/* 顶层错误提示 */}
       {error ? (

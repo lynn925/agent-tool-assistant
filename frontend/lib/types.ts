@@ -51,6 +51,8 @@ export interface TaskStep {
   result?: unknown;
   /** 错误码（失败时） */
   error?: string | null;
+  /** M5：这步重试了几次 */
+  retry?: number;
 }
 
 /** 一条聊天消息（前端渲染用） */
@@ -107,10 +109,30 @@ export interface ToolResultEvent {
   result?: unknown;
   /** 错误码（失败时） */
   error?: string | null;
-  /** 重试次数（M5 用） */
+  /** 重试次数（M5）：重试几次后成功/失败 */
   retry?: number;
   /** 执行耗时（毫秒） */
   latency_ms?: number;
+}
+
+/**
+ * retry：M5 的重试事件。
+ *
+ * 每次「即将重试」时推一次，让前端实时显示「重试中…」而不是干等。
+ */
+export interface RetryEvent {
+  /** 出错的层：tool 工具层 / llm 模型层 */
+  layer: "tool" | "llm";
+  /** 哪一步：工具层是 step-1，模型层是 planner / aggregator */
+  stage: string;
+  /** 工具名（只有工具层有） */
+  name?: string;
+  /** 即将进行的第几次重试，从 1 开始 */
+  attempt: number;
+  /** 总共最多尝试几次（含首次） */
+  max_attempts: number;
+  /** 失败原因 */
+  message: string;
 }
 
 /** message_end：助手消息结束 */
@@ -137,12 +159,17 @@ export interface StepUpdateEvent {
   status: TaskStep["status"];
   description: string;
   tool?: string | null;
+  /** M5：失败原因（failed / skipped 时有值） */
+  error?: string | null;
+  /** M5：这步重试了几次 */
+  retry?: number;
 }
 
 /**
  * 后端可能发来的全部事件类型。
  *
  * M3 新增了 plan_update / step_update 两个计划相关事件。
+ * M5 新增了 retry 事件（重试中的实时提示）。
  */
 export type ChatEvent =
   | { event: "message_start"; data: MessageStartEvent }
@@ -151,5 +178,6 @@ export type ChatEvent =
   | { event: "tool_result"; data: ToolResultEvent }
   | { event: "plan_update"; data: PlanUpdateEvent }
   | { event: "step_update"; data: StepUpdateEvent }
+  | { event: "retry"; data: RetryEvent }
   | { event: "message_end"; data: MessageEndEvent }
   | { event: "error"; data: ErrorEvent };

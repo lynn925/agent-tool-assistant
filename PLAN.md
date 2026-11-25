@@ -13,7 +13,7 @@
 | M2 | OpenAI Function Calling 三工具（天气/搜索/计算器） | ✅ 已完成 |
 | M3 | LangGraph 多步任务编排 | ✅ 已完成 |
 | M4 | 记忆（Checkpointer） | ✅ 已完成 |
-| M5 | 错误恢复（重试） | ⏳ |
+| M5 | 错误恢复（重试） | ✅ 已完成 |
 | M6 | UI 完善（不含部署） | ⏳ |
 
 ---
@@ -410,3 +410,86 @@ frontend/components/chat/
 ### 13.4 API 契约变更
 
 `POST /api/chat` 的 `thread_id` 从**可选**变为**必传**（缺失返回 422）。
+
+---
+
+## 14. M5 实施补充（M4 → M5 的变更）
+
+### 14.1 三个关键实现要点
+
+**重试判定是白名单式的，不是「捕获所有异常」。**
+可重试的只有三类：网络抖动（httpx 超时/连接失败）、限流（429）、上游 5xx。
+参数写错、表达式有黑名单词、鉴权失败 —— 这些重试一万次也是同样的错，
+所以它们命中 `PERMANENT_EXCEPTIONS`，一次都不重试。
+
+**工具失败有两种形态，重试层要同时处理。**
+三个工具都是自己吞掉异常、返回 `{"error": "timeout"}`，
+所以光靠 `retry_if_exception` 是不够的 —— 还得用 `retry_if_result`
+判返回值。两个条件是「或」的关系。
+
+**关掉 openai SDK 的内置重试，让 tenacity 当唯一的重试层。**
+`ChatOpenAI(max_retries=0)`。否则 SDK 内部重试 2 次 × tenacity 重试 3 次
+= 最多 16 次调用，而且用户看不到 SDK 内部重试了几次 ——
+「重试 N 次」的徽章就不准了。
+
+### 14.2 tenacity 的两个坑（实测踩到）
+
+**坑 1：结果型重试耗尽会丢错误码。**
+
+工具失败返回 `{"error": "timeout"}`，但 `reraise=True` 时
+tenacity 抛的是 `RetryError` —— 里面只包了个 Future，
+真正的错误码拿不到了。
+
+解决：用 `retry_error_callback` 把最后一次的结果原样返回，
+不抛 `RetryError`。
+
+**坑 2：`before_sleep` 才是重试次数的正确来源。**
+
+`retry_state.attempt_number` 在 `before_sleep` 回调里表示的是
+「即将进行的第几次尝试」，直接拿来当「已重试次数」会算错。
+数 `before_sleep` 的调用次数才是准确的。
+
+### 14.3 与原计划的三处偏差
+
+| 项 | 原计划 | 实际实现 | 原因 |
+|---|---|---|---|
+| 步骤失败的状态 | `failed` → 标记 `skipped` | `failed` 保持 failed，后续步骤照常执行 | `skipped` 原意是"因上一步失败而跳过"，但混用后分不清"失败了"和"没执行"。已与用户确认：失败那步标红（failed），只有"没法执行"（工具不存在/参数非法）才标黄（skipped） |
+| 失败状态是否阻塞 | 两种说法并存 | **不阻塞** | 用户确认：独立步骤不该因为别的步骤失败而丢失结果 |
+| 工具错误码分类 | 按异常类型分类 | 额外按**返回值**分类 | 三个工具都吞掉异常返回错误字典，只看异常永远看不到 transient 失败 |
+
+### 14.4 状态语义（M5 最终版）
+
+| 状态 | 含义 | 颜色 | 是否阻塞后续 |
+|---|---|---|---|
+| `done` | 成功 | 绿 | — |
+| `failed` | 执行了但没成功（重试耗尽 / 工具报错） | 红 | ❌ 不阻塞 |
+| `skipped` | 根本没法执行（工具不存在 / 参数非法） | 黄 | ❌ 不阻塞 |
+
+### 14.5 新增文件
+
+```
+backend/app/agent/
+└── retry.py             # 重试策略核心：错误分类 + tenacity 封装
+
+backend/tests/
+├── test_retry.py        # 错误分类 + 重试行为（34 个）
+└── test_nodes_retry.py  # executor 的 failed/skipped 语义（10 个）
+```
+
+### 14.6 新增 SSE 事件
+
+| event | data | 含义 |
+|---|---|---|
+| `retry` | `{layer, stage, attempt, max_attempts, message}` | 正在重试（layer: tool / llm） |
+
+同时给已有事件加了字段：
+
+| event | 新增字段 |
+|---|---|
+| `tool_result` | `retry` — 重试了几次 |
+| `step_update` | `retry` — 重试了几次；`error` — 失败原因 |
+| `plan_update` | 每个 step 带 `retry` |
+
+### 14.7 配置
+
+`backend/.env` 可加 `RETRY_MAX_ATTEMPTS`（默认 3，即最多尝试 4 次）。

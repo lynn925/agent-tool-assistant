@@ -7,9 +7,13 @@
 
 设计决策（已与用户确认）：
   1. executor 直接按计划调用工具函数，不再让模型自己选工具 —— 快、省 token、行为确定；
-  2. 某步失败时标记为 skipped，继续下一步，不阻塞整个计划。
+  2. 某步失败时标记为 failed，继续下一步，不阻塞整个计划。
+
+M5 的变化：工具调用和 LLM 调用都套上了重试层（app/agent/retry.py），
+失败时通过 SSE 实时告诉前端「第几次重试」。
 """
 
+import asyncio
 import json
 import re
 import time
@@ -18,8 +22,10 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from langgraph.config import get_stream_writer
+from pydantic import ValidationError
 
 from app.agent.prompts import AGGREGATOR_PROMPT, PLANNER_PROMPT
+from app.agent.retry import is_transient, run_tool_with_retry, run_with_retry
 from app.agent.state import AgentState, TaskStep
 from app.agent.text import ThinkFilter, extract_conversation, strip_think
 from app.agent.tools import ALL_TOOLS, LATENCY_KEY
@@ -50,14 +56,38 @@ _ARG_ALIASES: dict[str, str] = {
 
 
 def _model(temperature: float = 0.2) -> ChatOpenAI:
-    """创建聊天模型实例（不复用 M2 的缓存，因为温度不同）。"""
+    """创建聊天模型实例（不复用 M2 的缓存，因为温度不同）。
+
+    max_retries=0：openai SDK 自带 2 次重试，M5 用 tenacity 做重试，
+    两层叠在一起会变成 2×4 次调用，而且用户看不到 SDK 内部重试了几次。
+    关掉 SDK 的重试，让 tenacity 当唯一的重试层 —— 这样
+    "重试了几次" 才能如实反馈到前端。
+    """
     s = get_settings()
     return ChatOpenAI(
         model=s.openai_model,
         api_key=s.openai_api_key or None,
         base_url=s.openai_base_url or None,
         temperature=temperature,
+        max_retries=0,
     )
+
+
+def _retry_message(retry_state, attempt: int) -> str:
+    """生成一句人类可读的重试提示。
+
+    会区分「异常型失败」和「返回值型失败」（工具自己吞掉异常时）。
+    """
+    outcome = retry_state.outcome
+    if outcome is not None and outcome.failed:
+        exc = outcome.exception()
+        return f"{type(exc).__name__}: {exc}"
+
+    # 结果型失败：工具返回了 {"error": "timeout"} 这类字典
+    result = outcome.result() if outcome is not None else None
+    if isinstance(result, dict) and "error" in result:
+        return str(result["error"])
+    return "未知错误"
 
 
 def _extract_json(text: str) -> dict | None:
@@ -135,6 +165,9 @@ async def planner_node(state: AgentState) -> dict:
 
     M4 变化：会带上历史对话，让 planner 能理解上下文指代
     （比如"再算一下"要知道在算什么）。
+
+    M5 变化：LLM 调用套上重试层，网络抖动/限流会自动重试，
+    重试过程通过 SSE 实时推给前端。
     """
     writer = get_stream_writer()
     user_text, history = extract_conversation(state["messages"])
@@ -145,11 +178,33 @@ async def planner_node(state: AgentState) -> dict:
     payload_messages.extend(history)
     payload_messages.append({"role": "user", "content": user_text})
 
-    response = await _model().ainvoke(
-        payload_messages,
-        response_format={"type": "json_object"},
-    )
+    async def _invoke():
+        return await _model().ainvoke(
+            payload_messages,
+            response_format={"type": "json_object"},
+        )
 
+    def _on_retry(retry_state) -> None:
+        """重试前推送事件，让前端显示「正在重试」。"""
+        writer(
+            {
+                "event": "retry",
+                "layer": "llm",
+                "stage": "planner",
+                # attempt_number 在 before_sleep 时就是「即将进行的第几次重试」
+                "attempt": retry_state.attempt_number,
+                "max_attempts": get_settings().retry_max_attempts + 1,
+                "message": _retry_message(retry_state, retry_state.attempt_number),
+            }
+        )
+
+    outcome = await run_with_retry(_invoke, on_retry=_on_retry)
+
+    if not outcome.ok:
+        # LLM 层重试耗尽 —— 抛出去，让 chat.py 统一转成 error 事件
+        raise outcome.error  # type: ignore[misc]
+
+    response = outcome.result
     raw = response.content if isinstance(response.content, str) else ""
     payload = _extract_json(raw)
     raw_steps = (payload or {}).get("steps") or []
@@ -179,7 +234,12 @@ async def planner_node(state: AgentState) -> dict:
 async def executor_node(state: AgentState) -> dict:
     """执行节点：执行当前这一步。
 
-    失败不抛出异常 —— 标记为 skipped 然后继续下一步。
+    M5 变化：工具调用套上重试层，transient 失败会指数退避重试（1s/2s/4s）。
+
+    状态语义（已与用户确认）：
+      done     成功
+      failed   这一步执行了但没成功（工具报错 / 重试耗尽）→ 继续执行后续步骤
+      skipped  这一步根本没法执行（工具不存在 / 参数非法）→ 同样继续后续步骤
     """
     writer = get_stream_writer()
     plan = list(state.get("plan") or [])
@@ -208,30 +268,56 @@ async def executor_node(state: AgentState) -> dict:
     # 按计划调用工具
     tool = next((t for t in ALL_TOOLS if t.name == tool_name), None)
     if tool is None:
+        # 工具根本不存在 —— 这步没法执行
         step["status"] = "skipped"
         step["error"] = "unknown_tool"
         plan[index] = step
         writer({"event": "step", "step": step})
         return {"plan": plan, "current_step": index + 1}
 
-    try:
-        result = await tool.ainvoke(args)
-    except Exception as exc:
-        result = {"error": f"tool_exception: {exc}"}
+    def _on_retry(retry_state) -> None:
+        """重试前推送事件，让前端实时显示「正在重试」。"""
+        writer(
+            {
+                "event": "retry",
+                "layer": "tool",
+                "stage": step["id"],
+                "name": tool_name,
+                # attempt_number 在 before_sleep 时就是「即将进行的第几次重试」
+                "attempt": retry_state.attempt_number,
+                "max_attempts": get_settings().retry_max_attempts + 1,
+                "message": _retry_message(retry_state, retry_state.attempt_number),
+            }
+        )
 
+    outcome = await run_tool_with_retry(tool, args, on_retry=_on_retry)
     latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    step["retry"] = outcome.report.retries
 
-    # 工具返回里带 "error" 字段就代表失败
-    if isinstance(result, dict) and "error" in result:
-        step["status"] = "skipped"
-        step["error"] = str(result["error"])
+    if outcome.error is not None:
+        # 抛异常了：参数非法（permanent）就跳过，其他算失败
+        exc = outcome.error
+        is_validation = isinstance(exc, ValidationError)
+        step["status"] = "skipped" if is_validation else "failed"
+        step["error"] = (
+            f"invalid_arguments: {exc}"
+            if is_validation
+            else f"{type(exc).__name__}: {exc}"
+        )
         step["result"] = None
     else:
-        step["status"] = "done"
-        # 摘掉内部的耗时字段，它不属于工具的业务结果
-        if isinstance(result, dict):
-            result = {k: v for k, v in result.items() if k != LATENCY_KEY}
-        step["result"] = result
+        result = outcome.result
+        # 工具返回里带 "error" 字段就代表失败
+        if isinstance(result, dict) and "error" in result:
+            step["status"] = "failed"
+            step["error"] = str(result["error"])
+            step["result"] = None
+        else:
+            step["status"] = "done"
+            # 摘掉内部的耗时字段，它不属于工具的业务结果
+            if isinstance(result, dict):
+                result = {k: v for k, v in result.items() if k != LATENCY_KEY}
+            step["result"] = result
 
     plan[index] = step
     writer({"event": "step", "step": step})
@@ -244,6 +330,7 @@ async def executor_node(state: AgentState) -> dict:
             "ok": step["status"] == "done",
             "result": step["result"],
             "error": step["error"],
+            "retry": step["retry"],
             "latency_ms": latency_ms,
         }
     )
@@ -261,6 +348,10 @@ async def aggregator_node(state: AgentState) -> dict:
     M4 变化：会带上历史对话。
     这是记忆能生效的关键 —— 之前只把当前问题给了模型，
     "我叫小明"这类信息传不下去，模型就会说"我不知道你的名字"。
+
+    M5 变化：LLM 调用套上重试层，但**只在还没吐出正文时重试**。
+    如果已经推了 token 给前端再重试，前端会收到重复的内容 ——
+    所以流已经开始之后的失败直接抛出，不重试。
     """
     writer = get_stream_writer()
     plan = state.get("plan") or []
@@ -272,8 +363,9 @@ async def aggregator_node(state: AgentState) -> dict:
         status = step.get("status", "")
         if status == "done":
             lines.append(f"- {desc}：{step.get('result')}")
-        elif status == "skipped":
-            lines.append(f"- {desc}：失败（{step.get('error')}），已跳过")
+        elif status in ("failed", "skipped"):
+            # M5：failed 和 skipped 都如实告诉汇总器，不要编造结果
+            lines.append(f"- {desc}：未完成（{step.get('error')}），已跳过")
         else:
             lines.append(f"- {desc}：{status}")
 
@@ -293,16 +385,46 @@ async def aggregator_node(state: AgentState) -> dict:
     model = _model()
     think = ThinkFilter()
     answer_parts: list[str] = []
+    retries = 0
 
-    # 逐 token 消费模型输出，边过滤推理块边推给前端
-    async for chunk in model.astream(payload_messages):
-        text = chunk.content if isinstance(chunk.content, str) else ""
-        if not text:
-            continue
-        delta = think.feed(text)
-        if delta:
-            answer_parts.append(delta)
-            writer({"event": "delta", "text": delta})
+    async def _stream_once() -> None:
+        """跑一遍流式生成，把正文推给前端。"""
+        async for chunk in model.astream(payload_messages):
+            text = chunk.content if isinstance(chunk.content, str) else ""
+            if not text:
+                continue
+            delta = think.feed(text)
+            if delta:
+                answer_parts.append(delta)
+                writer({"event": "delta", "text": delta})
+
+    while True:
+        try:
+            await _stream_once()
+            break
+        except Exception as exc:
+            # 已经吐过正文了 —— 重试会导致前端收到重复内容，只能放弃
+            if answer_parts:
+                raise
+            # 永久错误（鉴权失败、请求不合法）不重试
+            if not is_transient(exc):
+                raise
+            # 重试次数用完了
+            if retries >= get_settings().retry_max_attempts:
+                raise
+            retries += 1
+            writer(
+                {
+                    "event": "retry",
+                    "layer": "llm",
+                    "stage": "aggregator",
+                    "attempt": retries,
+                    "max_attempts": get_settings().retry_max_attempts + 1,
+                    "message": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            # 指数退避：1s / 2s / 4s
+            await asyncio.sleep(2 ** (retries - 1))
 
     # 流结束后补上扣住的尾巴
     trailing = think.flush()
@@ -320,7 +442,8 @@ async def aggregator_node(state: AgentState) -> dict:
 def should_continue(state: AgentState) -> str:
     """条件边：还有下一步没执行完就继续，否则去汇总。
 
-    失败（skipped）的步骤不阻塞流程 —— 直接往下走。
+    M5：失败（failed）和跳过（skipped）的步骤都不阻塞流程 ——
+    它们只是"这一步没拿到结果"，后面的步骤是独立的，照常执行。
     """
     plan = state.get("plan") or []
     current = state.get("current_step", 0)

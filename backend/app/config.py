@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # M4 记忆持久化：SQLite 数据库文件路径
     checkpoint_db_path: str = "data/checkpoints.db"
 
+    # M5 错误恢复：最大重试次数（不含首次尝试）。
+    # 3 次重试 = 最多 4 次调用，退避 1s/2s/4s。
+    retry_max_attempts: int = 3
+
 
 @lru_cache
 def get_settings() -> Settings:

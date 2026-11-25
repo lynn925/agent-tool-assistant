@@ -30,7 +30,7 @@ const STATUS_LABELS: Record<ToolCall["status"], string> = {
 /**
  * 单个工具调用的折叠卡片。
  *
- * 收起时显示：工具名 + 状态徽章 + 耗时。
+ * 收起时显示：工具名 + 状态徽章 + 重试徽章 + 耗时。
  * 展开后显示：调用参数 + 执行结果（失败时显示错误码）。
  */
 export function ToolCallCard({ call }: { call: ToolCall }) {
@@ -52,6 +52,15 @@ export function ToolCallCard({ call }: { call: ToolCall }) {
         >
           {STATUS_LABELS[call.status]}
         </span>
+        {/* M5：重试过才显示徽章 */}
+        {call.retry && call.retry > 0 ? (
+          <span
+            className="rounded-full border border-amber-500/40 px-2 py-0.5 text-xs text-amber-600 dark:text-amber-400"
+            title="发生过瞬时错误，已自动重试"
+          >
+            🔁 重试 {call.retry} 次
+          </span>
+        ) : null}
         {/* 有耗时才显示 */}
         {call.latencyMs !== undefined ? (
           <span className="text-xs text-muted-foreground">

@@ -11,6 +11,10 @@ M1 返回普通 JSON，M2 改成 SSE，M3 在 M2 事件基础上加了计划相�
   content_delta {delta}                                  最终答案的文本片段
   message_end   {finish_reason:"stop"|"error"}          助手消息结束
   error         {code, message, retriable}              全局错误
+
+M5 新增：
+  retry         {layer, stage, attempt, max_attempts, message}  正在重试
+  tool_result 多了 retry 字段 —— 重试几次后成功的
 """
 
 import json
@@ -25,6 +29,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent.checkpointer import get_checkpointer
 from app.agent.graph import build_graph_with_memory
+from app.agent.retry import is_transient
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -61,6 +66,8 @@ def _step_payload(step: dict) -> dict:
         "status": step.get("status", "pending"),
         "result": step.get("result"),
         "error": step.get("error"),
+        # M5：这步重试了几次
+        "retry": step.get("retry", 0),
     }
 
 
@@ -119,6 +126,10 @@ async def _stream_events(user_message: str, thread_id: str) -> AsyncIterator[dic
                         "status": step.get("status", "pending"),
                         "description": step.get("description", ""),
                         "tool": step.get("tool"),
+                        # M5：错误原因和重试次数 —— 前端要靠它们显示
+                        # 「执行失败（xxx），已重试 N 次」
+                        "error": step.get("error"),
+                        "retry": step.get("retry", 0),
                     },
                 )
 
@@ -127,6 +138,12 @@ async def _stream_events(user_message: str, thread_id: str) -> AsyncIterator[dic
                 payload = dict(chunk)
                 payload.pop("event", None)
                 yield _sse("tool_result", payload)
+
+            elif event == "retry":
+                # M5：正在重试。前端据此显示「重试中…」的提示
+                payload = dict(chunk)
+                payload.pop("event", None)
+                yield _sse("retry", payload)
 
             elif event == "delta":
                 # 最终答案的文本片段
@@ -144,7 +161,19 @@ async def _stream_events(user_message: str, thread_id: str) -> AsyncIterator[dic
         return
     except Exception as exc:
         # 其他未预期的异常（比如 LLM 接口挂了）
-        yield _sse("error", {"code": "agent_failed", "message": str(exc), "retriable": True})
+        # M5：区分两类错误 ——
+        #   transient（如限流、连接失败）：重试层已经自动重试过，
+        #     但还是没成功。属于服务端临时问题，用户稍后重发可能就好了 → retriable=True
+        #   permanent（如鉴权失败、请求不合法）：重发也没用 → retriable=False
+        retriable = is_transient(exc)
+        yield _sse(
+            "error",
+            {
+                "code": "agent_failed" if retriable else "agent_error",
+                "message": f"{type(exc).__name__}: {exc}",
+                "retriable": retriable,
+            },
+        )
         yield _sse("message_end", {"finish_reason": "error"})
         return
 

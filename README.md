@@ -8,7 +8,7 @@
 | M2 | OpenAI Function Calling 三工具（天气/搜索/计算器） | ✅ 已完成 |
 | M3 | LangGraph 多步任务编排 | ✅ 已完成 |
 | M4 | 记忆（Checkpointer） | ✅ 已完成 |
-| M5 | 错误恢复（重试） | ⏳ |
+| M5 | 错误恢复（重试） | ✅ 已完成 |
 | M6 | UI 完善 + 部署文档 | ⏳ |
 
 ## 架构
@@ -51,7 +51,7 @@ npm run dev
 - 前端：http://localhost:3000
 - 后端：http://localhost:8000/docs（FastAPI Swagger）
 
-## 当前进度（M4）
+## 当前进度（M5）
 
 - ✅ 根 monorepo 配置
 - ✅ 后端 FastAPI 脚手架（CORS + /api/health）
@@ -63,7 +63,8 @@ npm run dev
 - ✅ 前端计划面板 + 工具调用卡片（可展开看参数与结果、显示耗时与失败状态）
 - ✅ 记忆持久化：SQLite checkpointer，多会话隔离
 - ✅ 前端会话切换（新建 / 切换 / 清空）+ 历史消息加载
-- ⏳ M5 起做错误恢复
+- ✅ 错误自动重试：工具层 + LLM 层，指数退避，实时反馈重试进度
+- ⏳ M6 做 UI 完善
 
 ### M3 的执行流程
 
@@ -112,7 +113,39 @@ SqliteSaver 读写 data/checkpoints.db
 
 > `web_search` 需要在 `backend/.env` 填入 `SERPAPI_API_KEY`；未配置时返回错误字典，不会抛异常。
 
+### M5 的错误恢复机制
+
+```
+工具/LLM 调用
+  ↓
+判断错误类型：transient 还是 permanent
+  ├── transient（超时 / 限流 / 5xx）→ 指数退避重试 1s → 2s → 4s（最多 3 次）
+  │                                  每次重试推送 retry 事件，前端实时显示
+  └── permanent（参数非法 / 鉴权失败）→ 立即失败，不重试
+  ↓
+重试耗尽仍失败 → 步骤标记 failed（红），后续步骤照常执行
+```
+
+**关键点 1**：重试判定是白名单式的。只有网络抖动、限流、5xx 才重试；
+参数写错、表达式有黑名单词、鉴权失败 —— 重试一万次也是同样的错。
+
+**关键点 2**：三个工具都自己吞掉异常、返回 `{"error": "timeout"}`，
+所以重试层要同时判**异常**和**返回值**（`retry_if_exception | retry_if_result`）。
+
+**关键点 3**：`ChatOpenAI(max_retries=0)` 关掉了 openai SDK 的内置重试，
+让 tenacity 当唯一的重试层 —— 否则「🔁 重试 N 次」的计数不准。
+
+核心逻辑在 [retry.py](file:///Users/xinao/Desktop/ai-project/agent-tool-assistant/backend/app/agent/retry.py)。
+
+### M5 的步骤状态语义
+
+| 状态 | 含义 | 颜色 | 是否阻塞后续步骤 |
+|---|---|---|---|
+| `done` | 成功 | 绿 | — |
+| `failed` | 执行了但没成功（重试耗尽 / 工具报错） | 红 | ❌ 不阻塞 |
+| `skipped` | 根本没法执行（工具不存在 / 参数非法） | 黄 | ❌ 不阻塞 |
+
 ## 技术栈
 
-**后端**：Python 3.11 · FastAPI · LangGraph · LangChain OpenAI · httpx · sympy
+**后端**：Python 3.11 · FastAPI · LangGraph · LangChain OpenAI · httpx · sympy · tenacity
 **前端**：Next.js 16 · TypeScript · Tailwind v4 · shadcn/ui

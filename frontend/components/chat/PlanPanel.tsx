@@ -40,7 +40,13 @@ const TOOL_LABELS: Record<string, string> = {
  * 任务计划面板（M3）。
  *
  * 展示 planner 生成的步骤清单，以及每一步的实时状态。
- * 失败的步骤会标黄并说明原因。
+ *
+ * M5 的状态语义：
+ *   done     成功（绿）
+ *   failed   这步执行了但没成功（红）—— 已重试过或重试耗尽
+ *   skipped  这步没法执行（黄）—— 工具不存在 / 参数非法
+ *
+ * failed 和 skipped 都是「这一步没拿到结果」，但不阻塞后续步骤。
  */
 export function PlanPanel({ steps }: { steps: TaskStep[] }) {
   if (steps.length === 0) return null;
@@ -66,10 +72,19 @@ export function PlanPanel({ steps }: { steps: TaskStep[] }) {
                     </span>
                   ) : null}
                 </p>
-                {/* 跳过/失败时说明原因 */}
+                {/* 失败：说明原因，并标注重试次数 */}
+                {step.status === "failed" && step.error ? (
+                  <p className="mt-0.5 text-xs text-red-600 dark:text-red-400">
+                    执行失败（{step.error}）
+                    {step.retry && step.retry > 0
+                      ? `，已重试 ${step.retry} 次`
+                      : ""}
+                  </p>
+                ) : null}
+                {/* 跳过：这步没法执行 */}
                 {step.status === "skipped" && step.error ? (
                   <p className="mt-0.5 text-xs text-amber-600 dark:text-amber-400">
-                    执行失败（{step.error}），已跳过
+                    无法执行（{step.error}），已跳过
                   </p>
                 ) : null}
               </div>
