@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.checkpointer import checkpointer_scope
-from app.api import chat, echo, health, memory, threads
+from app.api import chat, echo, health, memory, models, threads
 from app.config import get_settings
 
 settings = get_settings()
@@ -47,3 +47,4 @@ app.include_router(echo.router)
 app.include_router(chat.router)
 app.include_router(memory.router)
 app.include_router(threads.router)
+app.include_router(models.router)

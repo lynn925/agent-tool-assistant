@@ -9,7 +9,7 @@
 | M3 | LangGraph 多步任务编排 | ✅ 已完成 |
 | M4 | 记忆（Checkpointer） | ✅ 已完成 |
 | M5 | 错误恢复（重试） | ✅ 已完成 |
-| M6 | UI 完善 + 部署文档 | ⏳ |
+| M6 | UI 完善（不含部署） | ✅ 已完成 |
 
 ## 架构
 
@@ -64,7 +64,10 @@ npm run dev
 - ✅ 记忆持久化：SQLite checkpointer，多会话隔离
 - ✅ 前端会话切换（新建 / 切换 / 清空）+ 历史消息加载
 - ✅ 错误自动重试：工具层 + LLM 层，指数退避，实时反馈重试进度
-- ⏳ M6 做 UI 完善
+- ✅ 暗色模式：跟随系统 / 亮 / 暗 三态切换
+- ✅ 空状态引导 + 示例 prompt、头像、流式动画、长消息折叠
+- ✅ 自动滚动到底部、单条消息重发
+- ✅ 设置页：模型 / 温度 / 重试上限（纯前端，随请求发给后端）
 
 ### M3 的执行流程
 
@@ -102,6 +105,7 @@ SqliteSaver 读写 data/checkpoints.db
 | GET | `/api/memory/{thread_id}` | 读取会话历史消息 |
 | DELETE | `/api/memory/{thread_id}` | 清空会话记忆 |
 | GET | `/api/threads` | 列出所有会话 |
+| GET | `/api/models` | 列出 provider 与可用模型（M6） |
 
 ### 工具契约
 
@@ -145,7 +149,61 @@ SqliteSaver 读写 data/checkpoints.db
 | `failed` | 执行了但没成功（重试耗尽 / 工具报错） | 红 | ❌ 不阻塞 |
 | `skipped` | 根本没法执行（工具不存在 / 参数非法） | 黄 | ❌ 不阻塞 |
 
+### M6 的设置项（纯前端）
+
+设置存 localStorage，随每次请求发给后端：
+
+```
+设置页 → lib/settings.ts → POST /api/chat {model?, temperature?, retry_max_attempts?}
+  ↓
+chat.py 校验后放进 LangGraph 的 configurable
+  ↓
+nodes.py / retry.py 用 get_config() 取（请求级隔离，不污染全局）
+```
+
+| 参数 | 范围 | 说明 |
+|---|---|---|
+| `model` | 任意模型名 | 不传则用后端 `.env` 的 `OPENAI_MODEL` |
+| `temperature` | 0 ~ 1 | 只影响 aggregator；planner 固定 0.2 |
+| `retry_max_attempts` | 0 ~ 5 | 不传则用后端 `.env` 的 `RETRY_MAX_ATTEMPTS` |
+
+越界的值会在 API 入口被拒（422），不会流到节点里。
+
+### M6 的模型切换（多 provider）
+
+输入框左边有个模型切换器，可以随时切换 —— 不用去设置页。
+
+模型列表来自后端 `GET /api/models`：后端才知道 `.env` 里配了哪些 key、
+各个 provider 下有哪些模型。前端不再硬编码模型名。
+
+| provider | base_url | key 环境变量 | 默认模型 |
+|---|---|---|---|
+| MiniMax | `OPENAI_BASE_URL` | `OPENAI_API_KEY` | `OPENAI_MODEL` |
+| DeepSeek | `DEEPSEEK_BASE_URL` | `DEEPSEEK_API_KEY` | `DEEPSEEK_MODEL` |
+
+**启用 DeepSeek**：在 `backend/.env` 里填上 key，重启后端：
+
+```bash
+DEEPSEEK_API_KEY=sk-xxxxxxxx
+```
+
+没配 key 的 provider 在前端会置灰，选不了 —— 选了只会得到一个 401。
+
+**路由规则**：模型名以 `deepseek` 开头走 DeepSeek，以 `minimax` 开头走 MiniMax，
+其它走默认 provider。核心逻辑在 [providers.py](file:///Users/xinao/Desktop/ai-project/agent-tool-assistant/backend/app/agent/providers.py)。
+
+### M6 的暗色模式
+
+**Tailwind v4 的 `dark:` 默认跟随系统，不能手动切换。**
+所以 `globals.css` 里必须加这一行，否则所有 `dark:` 类都是哑弹：
+
+```css
+@custom-variant dark (&:is(.dark *));
+```
+
+配合 `next-themes` 的 `attribute="class"`，就能用 `.dark` 类驱动了。
+
 ## 技术栈
 
 **后端**：Python 3.11 · FastAPI · LangGraph · LangChain OpenAI · httpx · sympy · tenacity
-**前端**：Next.js 16 · TypeScript · Tailwind v4 · shadcn/ui
+**前端**：Next.js 16 · TypeScript · Tailwind v4 · shadcn/ui · next-themes · lucide-react

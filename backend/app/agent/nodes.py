@@ -21,10 +21,11 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from langgraph.config import get_stream_writer
+from langgraph.config import get_config, get_stream_writer
 from pydantic import ValidationError
 
 from app.agent.prompts import AGGREGATOR_PROMPT, PLANNER_PROMPT
+from app.agent.providers import provider_for_model
 from app.agent.retry import is_transient, run_tool_with_retry, run_with_retry
 from app.agent.state import AgentState, TaskStep
 from app.agent.text import ThinkFilter, extract_conversation, strip_think
@@ -55,20 +56,61 @@ _ARG_ALIASES: dict[str, str] = {
 }
 
 
-def _model(temperature: float = 0.2) -> ChatOpenAI:
+def _overrides() -> dict[str, Any]:
+    """读取本次请求的运行时覆盖值。
+
+    M6：设置页的值通过 LangGraph 的 configurable 传进来。
+    节点里用 get_config() 取 —— 这样每个请求独立，
+    不会污染全局配置，也不会让并发请求互相干扰。
+
+    不在图里跑的时候（比如单元测试直接调节点）会抛异常，
+    所以这里兜底返回空字典。
+    """
+    try:
+        config = get_config()
+    except Exception:
+        return {}
+    return (config.get("configurable") or {})
+
+
+def _max_retries() -> int:
+    """这次请求的重试次数上限（请求级覆盖 > 全局配置）。"""
+    value = _overrides().get("retry_max_attempts")
+    if value is not None:
+        return int(value)
+    return get_settings().retry_max_attempts
+
+
+def _model(temperature: float | None = None) -> ChatOpenAI:
     """创建聊天模型实例（不复用 M2 的缓存，因为温度不同）。
 
     max_retries=0：openai SDK 自带 2 次重试，M5 用 tenacity 做重试，
     两层叠在一起会变成 2×4 次调用，而且用户看不到 SDK 内部重试了几次。
     关掉 SDK 的重试，让 tenacity 当唯一的重试层 —— 这样
     "重试了几次" 才能如实反馈到前端。
+
+    M6：model 和 temperature 可以被请求级覆盖。
+    温度的语义：**聚合器**用请求里的值，**规划器**固定 0.2 ——
+    规划器要稳定（同样的问题应该拆出同样的步骤），
+    聚合器要发散（写最终回答）。
+
+    M6：模型名同时决定用哪个 provider（base_url + api_key）。
+    见 app/agent/providers.py —— 不同厂商的模型要走不同的接口地址。
     """
     s = get_settings()
+    overrides = _overrides()
+
+    model_name = overrides.get("model")
+    temp = temperature if temperature is not None else overrides.get("temperature")
+
+    # 按模型名路由到对应的 provider，拿它自己的 base_url 和 api_key
+    model_name, base_url, api_key = provider_for_model(model_name, s)
+
     return ChatOpenAI(
-        model=s.openai_model,
-        api_key=s.openai_api_key or None,
-        base_url=s.openai_base_url or None,
-        temperature=temperature,
+        model=model_name,
+        api_key=api_key or None,
+        base_url=base_url or None,
+        temperature=temp if temp is not None else 0.7,
         max_retries=0,
     )
 
@@ -179,7 +221,8 @@ async def planner_node(state: AgentState) -> dict:
     payload_messages.append({"role": "user", "content": user_text})
 
     async def _invoke():
-        return await _model().ainvoke(
+        # 规划器固定 0.2 —— 同样的问题应该拆出同样的步骤
+        return await _model(temperature=0.2).ainvoke(
             payload_messages,
             response_format={"type": "json_object"},
         )
@@ -193,7 +236,7 @@ async def planner_node(state: AgentState) -> dict:
                 "stage": "planner",
                 # attempt_number 在 before_sleep 时就是「即将进行的第几次重试」
                 "attempt": retry_state.attempt_number,
-                "max_attempts": get_settings().retry_max_attempts + 1,
+                "max_attempts": _max_retries() + 1,
                 "message": _retry_message(retry_state, retry_state.attempt_number),
             }
         )
@@ -285,7 +328,7 @@ async def executor_node(state: AgentState) -> dict:
                 "name": tool_name,
                 # attempt_number 在 before_sleep 时就是「即将进行的第几次重试」
                 "attempt": retry_state.attempt_number,
-                "max_attempts": get_settings().retry_max_attempts + 1,
+                "max_attempts": _max_retries() + 1,
                 "message": _retry_message(retry_state, retry_state.attempt_number),
             }
         )
@@ -382,6 +425,7 @@ async def aggregator_node(state: AgentState) -> dict:
         {"role": "user", "content": f"用户的问题：{user_text}\n\n执行结果：\n{context}"}
     )
 
+    # 聚合器用请求里的温度（没传就用默认值）
     model = _model()
     think = ThinkFilter()
     answer_parts: list[str] = []
@@ -410,7 +454,7 @@ async def aggregator_node(state: AgentState) -> dict:
             if not is_transient(exc):
                 raise
             # 重试次数用完了
-            if retries >= get_settings().retry_max_attempts:
+            if retries >= _max_retries():
                 raise
             retries += 1
             writer(
@@ -419,7 +463,7 @@ async def aggregator_node(state: AgentState) -> dict:
                     "layer": "llm",
                     "stage": "aggregator",
                     "attempt": retries,
-                    "max_attempts": get_settings().retry_max_attempts + 1,
+                    "max_attempts": _max_retries() + 1,
                     "message": f"{type(exc).__name__}: {exc}",
                 }
             )

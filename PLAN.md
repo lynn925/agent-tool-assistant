@@ -14,7 +14,7 @@
 | M3 | LangGraph 多步任务编排 | ✅ 已完成 |
 | M4 | 记忆（Checkpointer） | ✅ 已完成 |
 | M5 | 错误恢复（重试） | ✅ 已完成 |
-| M6 | UI 完善（不含部署） | ⏳ |
+| M6 | UI 完善（不含部署） | ✅ 已完成 |
 
 ---
 
@@ -493,3 +493,453 @@ backend/tests/
 ### 14.7 配置
 
 `backend/.env` 可加 `RETRY_MAX_ATTEMPTS`（默认 3，即最多尝试 4 次）。
+
+---
+
+## 15. M6 实施计划（UI 完善，不含部署）
+
+> 已与用户确认的两个决策：
+> 1. **设置页纯前端** —— 设置存 localStorage，随请求发给后端，不做后端持久化
+> 2. **shadcn CLI 安装组件** —— 联网装 @radix-ui/* 包
+
+### 15.1 先修一个必须修的 Bug：暗色模式根本不生效
+
+M1~M5 的代码里已经写了 8 处 `dark:` 类（如 `dark:text-red-400`），
+但**它们从来没生效过**。
+
+原因：Tailwind v4 的 `dark:` 变体默认驱动方式是 `@media (prefers-color-scheme: dark)`，
+不是类名。而 `globals.css` 里写的是 `.dark { ... }` —— 需要手动给 `<html>` 加 `.dark` 类。
+
+实测确认：
+
+```
+# 默认：生成 prefers-color-scheme 媒体查询（无法手动切换）
+grep -c "prefers-color-scheme" 输出 → 1
+
+# 加 @custom-variant 后：生成 .dark 类选择器（可手动切换）
+@custom-variant dark (&:is(.dark *));
+→ .probe { color: var(--color-red-600); &:is(.dark *) { color: var(--color-red-400); } }
+```
+
+**修复**：在 `globals.css` 里加一行
+
+```css
+@custom-variant dark (&:is(.dark *));
+```
+
+这一行是整个 M6 暗色模式的地基 —— 不加的话，做多少暗色 UI 都是白费。
+
+### 15.2 任务清单
+
+| # | 任务 | 涉及文件 | 说明 |
+|---|---|---|---|
+| T1 | 暗色模式地基 | `app/globals.css` | 加 `@custom-variant dark` |
+| T2 | 主题切换器 | `components/theme-toggle.tsx`（新） | 跟随系统 / 亮 / 暗 三态，存 localStorage |
+| T3 | 安装 shadcn 组件 | `components/ui/*` | badge / avatar / separator / skeleton / tooltip / dropdown-menu |
+| T4 | 组件归一化 | `components/ui/*` | CLI 装出来的组件要用 `@/lib/utils` 和 `@radix-ui/react-slot`，不能引 `cn` 和 `radix-ui` 包 |
+| T5 | 空状态 | `components/chat/EmptyState.tsx`（新） | 无消息时的引导 + 3 个示例 prompt，点击即填入 |
+| T6 | 头像与消息气泡 | `components/chat/MessageBubble.tsx` | 用 avatar 组件替换"你/Agent"文字 |
+| T7 | 流式三点动画 | `components/chat/StreamingDots.tsx`（新） | 生成中指示器 |
+| T8 | 长消息折叠 | `components/chat/MessageBubble.tsx` | >300 字折叠，展开按钮 |
+| T9 | 自动滚动 | `app/page.tsx` | 新消息/流式时滚到底部 |
+| T10 | 单条重发 | `app/page.tsx` + `components/chat/MessageBubble.tsx` | 重放同 thread_id |
+| T11 | 设置页 | `app/settings/page.tsx`（新） + `lib/settings.ts`（新） | 模型/温度/重试上限 |
+| T12 | 设置贯通到请求 | `lib/api.ts` + `backend/app/api/chat.py` | 随请求发给后端 |
+
+### 15.3 T11/T12：设置页的完整链路
+
+纯前端设置的关键设计 —— **后端要能按请求覆盖配置**。
+
+```
+设置页（lib/settings.ts，存 localStorage）
+  ↓
+POST /api/chat {message, thread_id, model?, temperature?, retry_max_attempts?}
+  ↓
+backend/app/api/chat.py  ← 校验并透传
+  ↓
+backend/app/agent/graph.py ← 运行时注入
+  ↓
+nodes.py 的 _model() / retry.py 读注入值而不是全局配置
+```
+
+**关键约束**：全局 `get_settings()` 里的值是**默认值**，
+请求里带的值是**覆盖值**。两者要分层，不能让请求直接改全局状态
+（否则并发请求会互相污染）。
+
+实现方式：把覆盖值放进 LangGraph 的 `config` 里（`configurable`），
+节点里用 `get_config()` 取出来。这样每个请求独立，互不影响。
+
+```python
+# graph.py
+config = {
+    "recursion_limit": RECURSION_LIMIT,
+    "configurable": {
+        "thread_id": thread_id,
+        "model": model,                    # 覆盖全局
+        "temperature": temperature,
+        "retry_max_attempts": retry_max_attempts,
+    },
+}
+```
+
+```python
+# nodes.py 的 _model()
+def _model(temperature: float | None = None) -> ChatOpenAI:
+    overrides = get_config().get("configurable") or {}
+    model_name = overrides.get("model") or get_settings().openai_model
+    temp = overrides.get("temperature") if temperature is None else temperature
+    ...
+```
+
+> 注意：`temperature` 在 planner（0.2）和 aggregator（默认）里用法不同，
+> 覆盖时要用**相对偏移**还是**绝对值**需要定清楚。
+> 建议：设置页的滑块直接对应 aggregator 的温度，planner 固定 0.2
+> （planner 要稳定，聚合器要发散）。
+
+### 15.4 T4：shadcn CLI 装的组件需要归一化（实测发现）
+
+shadcn CLI 4.23 装出来的组件用的是**最新 registry 风格**：
+
+```tsx
+import { cn } from "cn"          // ← 新包
+import { Slot } from "radix-ui"   // ← 统一包（会拖进 50+ 个 radix 依赖）
+```
+
+而本项目现有约定是：
+
+```tsx
+import { cn } from "@/lib/utils"
+import { Slot } from "@radix-ui/react-slot"
+```
+
+**实测结论**：CLI 会往 package.json 里加 `cn` 和 `radix-ui` 两个包，
+其中 `radix-ui` 是个 meta 包，把 50+ 个 radix 组件全装进来 —— 而我们只要用 6 个。
+
+**处理方式**：
+
+1. CLI 装完后，逐个把 `from "cn"` → `from "@/lib/utils"`、
+   `from "radix-ui"` → `from "@radix-ui/react-slot"`
+2. `npm uninstall cn radix-ui`
+3. 单独装真正需要的：`@radix-ui/react-avatar`、`@radix-ui/react-tooltip`、
+   `@radix-ui/react-dropdown-menu`、`@radix-ui/react-separator`、`@radix-ui/react-skeleton`
+
+> `badge` 已经实测过一遍：归一化后 TSC 通过，依赖回到原样。
+
+### 15.5 组件清单（对照 §9）
+
+| §9 计划里的组件 | 现状 | M6 动作 |
+|---|---|---|
+| `MessageBubble` | 已有 | 改：加 avatar、长消息折叠、重发按钮 |
+| `ToolCallCard` | 已有 | 改：状态徽章换成 shadcn `Badge` |
+| `PlanPanel` | 已有 | 不动（M5 已完善） |
+| `StreamingDots` | 无 | 新建 |
+| `ThreadSwitcher` | 已有 | 改：换成 shadcn `DropdownMenu`（原生日 select 移动端体验差） |
+| `EmptyState` | 无 | 新建 |
+| `avatar` | 无 | shadcn 安装 |
+| `badge` | 已装 | 归一化 |
+| `separator` | 无 | shadcn 安装 |
+| `sonner` | 无 | **不装** —— 用轻量 toast 替代，见 15.7 |
+| `skeleton` | 无 | shadcn 安装 |
+| `dialog` | 无 | **不装** —— 确认删除会话用 `window.confirm` 够了 |
+| `dropdown-menu` | 无 | shadcn 安装（替换原生 select） |
+| `tooltip` | 无 | shadcn 安装 |
+| `switch` | 无 | shadcn 安装（设置页用） |
+
+### 15.6 交互清单（对照 §9.3）
+
+| 项 | 实现要点 |
+|---|---|
+| 长消息自动折叠（>300 字） | `MessageBubble` 内判断长度，超了就截断 + 「展开」按钮 |
+| 自动滚动到底部 | `ScrollArea` 的 viewport 拿到 ref，`messages.length` 变化时 `scrollTop = scrollHeight`。**注意**：流式过程中每个 delta 都滚会抖，要节流 |
+| 流式中断 | 已有 `AbortController` + 「停止」按钮，✅ 已完成 |
+| 单条消息重发 | 「重发」按钮 → 拿原消息内容重发，**同 thread_id**（这样记忆是连贯的） |
+| 暗色模式 | T1 + T2，三态切换 |
+
+### 15.7 两处主动缩减（避免过度工程）
+
+**不做 `sonner`** —— 它要装 `next-themes` 之外的一堆依赖，
+而本项目的 toast 需求只有两种：「已复制」「设置已保存」。
+用 10 行代码 + `useState` 做一个轻量 Toast 更合适。
+
+**不做 `dialog`** —— 唯一用途是确认删除会话。
+`window.confirm` 一行搞定，不值得引入一个组件 + Portal 体系。
+
+### 15.8 实施顺序
+
+```
+T1 暗色地基  ← 必须最先做，否则后面全是白工
+  ↓
+T3+T4 shadcn 安装 + 归一化
+  ↓
+T2 主题切换器
+  ↓
+T5~T8 聊天区组件（空状态、头像、动画、折叠）
+  ↓
+T9+T10 交互（自动滚动、重发）
+  ↓
+T11+T12 设置页 + 后端贯通  ← 工作量最大，单独一块
+```
+
+### 15.9 验收标准
+
+| 项 | 怎么验 |
+|---|---|
+| 暗色模式真的生效 | 切到暗色，`.dark` 类出现在 `<html>` 上，截图对比亮/暗 |
+| 设置项真的贯通 | 设置温度为 0，改模型名，后端日志能看到实际用的值 |
+| 8 处旧 `dark:` 类生效 | 打开暗色，失败步骤的红色文字变浅（`dark:text-red-400`） |
+| 没有引入多余依赖 | `package.json` 只多出明确列出的 5 个 radix 包 + next-themes |
+| 类型检查通过 | `npx tsc --noEmit` 无错误 |
+| 后端回归 | `pytest` 全绿（后端只改了 chat.py 的请求模型） |
+
+### 15.10 风险与预案
+
+| 风险 | 预案 |
+|---|---|
+| shadcn CLI 装的组件风格和项目不一致 | 已实测：逐个改 import + 卸载 `cn`/`radix-ui` 即可 |
+| 自动滚动在流式时抖动 | 用 `requestAnimationFrame` 节流，或只在「用户已贴底」时才自动滚 |
+| 设置页的模型名是用户瞎填的 | 后端校验失败要返回清晰的错误码，不能 500 |
+| `temperature` 覆盖影响 planner | planner 固定 0.2，只让 aggregator 接受覆盖 |
+
+---
+
+## 16. M6 实施补充（计划 → 实际）
+
+### 16.1 实施中发现并修掉的老 Bug：暗色模式从未生效
+
+M1~M5 的代码里有 8 处 `dark:` 类（`dark:text-red-400` 等），
+但它们**一次都没生效过** —— 写的时候以为能用，实际全是哑弹。
+
+原因：Tailwind v4 的 `dark:` 默认是 `@media (prefers-color-scheme: dark)`，
+而 `globals.css` 写的是 `.dark { ... }` 类。两者对不上。
+
+**修复**（一行）：
+
+```css
+@custom-variant dark (&:is(.dark *));
+```
+
+实测验证（浏览器确认）：错误文字在亮色下是 `rgb(231,0,11)`（red-600），
+切到暗色变成 `rgb(255,100,103)`（red-400）—— 证明 `dark:` 变体真正命中了。
+
+> 这个 bug 值得单独记一笔：**没有验证过的 UI 代码等于没写**。
+> M1~M5 一直只做后端测试，前端的 `dark:` 类从没被真正检验过。
+
+### 16.2 shadcn CLI 的两个坑（实测）
+
+**坑 1：CLI 装出来的组件用的是最新 registry 风格。**
+
+```tsx
+import { cn } from "cn"          // ← 新包，项目用的是 @/lib/utils
+import { Slot } from "radix-ui"   // ← meta 包，会拖进 50+ 个 radix 依赖
+```
+
+**坑 2：不能用具名导入拆包。**
+
+CLI 的代码用的是 `AvatarPrimitive.Root` 这种命名空间访问，
+换成 `import { Avatar } from "@radix-ui/react-avatar"` 后
+`Avatar.Root` 就不存在了 —— TSC 直接报 20+ 个错。
+
+**正确解法**：
+
+```tsx
+import * as AvatarPrimitive from "@radix-ui/react-avatar"   // 命名空间
+import { Slot } from "@radix-ui/react-slot"                 // Slot 例外，它本身就是组件
+```
+
+装完再 `npm uninstall cn radix-ui`，单独装真正需要的 5 个 radix 包。
+
+### 16.3 设置项的并发安全：为什么要走 configurable
+
+设置页是纯前端的（存 localStorage，随请求发给后端），
+所以后端必须能**按请求**覆盖配置。
+
+如果直接改全局 `get_settings()` 的值，会有两个问题：
+1. 并发请求互相污染 —— A 请求改了模型名，B 请求跟着变了
+2. 改完就一直生效，没法回退
+
+**解法**：把覆盖值放进 LangGraph 的 `configurable`，节点用 `get_config()` 取。
+
+```python
+# chat.py
+configurable = {"thread_id": thread_id}
+if overrides.model:
+    configurable["model"] = overrides.model
+# ...
+config={"recursion_limit": 50, "configurable": configurable}
+```
+
+```python
+# nodes.py
+def _overrides() -> dict[str, Any]:
+    try:
+        config = get_config()
+    except Exception:
+        return {}          # 不在图里跑（单元测试）时兜底
+    return (config.get("configurable") or {})
+```
+
+每个请求独立，天然并发安全。
+
+### 16.4 温度的语义：planner 固定，aggregator 可调
+
+设置页的「温度」滑块只影响 **aggregator**（写最终回答），
+**planner 固定 0.2**。
+
+原因：planner 的职责是「把同样的问题拆成同样的步骤」——
+温度高了会导致每次拆解结果不同，行为不可预测。
+aggregator 是写最终回答，温度高一点更自然。
+
+```python
+# planner：固定
+return await _model(temperature=0.2).ainvoke(...)
+
+# aggregator：用请求里的值（没传则用默认）
+model = _model()
+```
+
+### 16.5 自动滚动的两个细节
+
+**细节 1：Radix ScrollArea 不透传 viewport 的 ref。**
+自动滚动要直接操作 `scrollTop`，所以给 ScrollArea 加了个 `viewportRef` prop。
+
+**细节 2：只在「用户本来就贴着底部」时才自动滚。**
+
+```tsx
+const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+setPinnedToBottom(distance < 32);   // 留 32px 余量
+```
+
+留余量的原因：滚动动画的最后一点点位移如果按 0 判断，
+会误判成「用户上翻了」，然后自动滚动就失效了。
+
+实测：流式期间 `distFromBottom` 始终为 0 —— 确认跟随。
+
+### 16.6 新增文件
+
+```
+frontend/app/settings/page.tsx     # 设置页
+frontend/lib/settings.ts           # 设置存取（localStorage）
+frontend/components/
+├── theme-provider.tsx             # next-themes 封装
+├── theme-toggle.tsx               # 三态主题切换
+└── chat/
+    ├── EmptyState.tsx             # 空状态 + 示例 prompt
+    └── StreamingDots.tsx          # 流式三点动画
+
+frontend/components/ui/            # shadcn 安装（已归一化）
+├── avatar.tsx  badge.tsx  separator.tsx
+├── skeleton.tsx  tooltip.tsx  dropdown-menu.tsx  switch.tsx
+
+backend/tests/
+└── test_settings.py               # 设置贯通（11 个）
+```
+
+### 16.7 主动砍掉的部分
+
+| 组件 | 原因 |
+|---|---|
+| `sonner` | toast 需求只有「已保存」一种，10 行 state 够用 |
+| `dialog` | 唯一用途是确认删除会话，`window.confirm` 一行搞定 |
+| `switch` | 装了但没用上 —— 设置项都是滑块/输入框，没有开关 |
+
+### 16.8 最终状态
+
+| 项 | 结果 |
+|---|---|
+| 后端测试 | 103 个通过（含新增 11 个设置测试） |
+| 前端类型检查 | 通过 |
+| 浏览器回归 | 9 项特性全部通过，无 console 错误 |
+| 新增依赖 | 5 个 radix 包 + next-themes（无 `cn`、无 `radix-ui` meta 包） |
+
+---
+
+## 17. M6 补充：模型切换 + 多 provider
+
+### 17.1 起因：之前的「切换模型」其实是假的
+
+用户问「你做的那个切换模型有用吗？」—— 实测发现**没用**。
+
+前端设置页能改模型名，但后端只有一个全局的 `OPENAI_BASE_URL`，
+所以换个模型名的同时 base_url 还是老的。实测：
+
+```
+model=gpt-4o-mini（但 base_url 指向 MiniMax）
+→ OpenAIInvalidRequestError: 400 - invalid params, unknown model 'gpt-4o-mini'
+```
+
+**切换模型名 ≠ 切换服务商。** 这是 M6 最初设计里的根本缺陷。
+
+### 17.2 解法：按模型名路由到 provider
+
+新增 [providers.py](file:///Users/xinao/Desktop/ai-project/agent-tool-assistant/backend/app/agent/providers.py)：
+
+```
+模型名以 "deepseek" 开头 → DEEPSEEK_BASE_URL + DEEPSEEK_API_KEY
+模型名以 "minimax" 开头 → OPENAI_BASE_URL  + OPENAI_API_KEY
+其它                    → 默认 provider
+```
+
+DeepSeek 也是 OpenAI 兼容格式，所以只是换了 base_url 和 key。
+
+**没配 key 时抛 `ProviderNotConfigured`**，而不是让上游报含糊的 401：
+
+```
+"DeepSeek 还没配置 API Key。请在 backend/.env 里设置对应的环境变量（DEEPSEEK_API_KEY）后重启后端。"
+```
+
+### 17.3 模型列表改由后端提供
+
+**前端不再硬编码模型列表。** 之前硬编码过一份（gpt-4o-mini / gpt-4o / MiniMax-M3），
+但后端的 base_url 指向 MiniMax —— 选 gpt-4o 必然报错。
+
+硬编码的列表和后端配置很容易对不上。现在由 `GET /api/models` 提供：
+
+```json
+{
+  "default_model": "MiniMax-M3",
+  "providers": [
+    { "id": "minimax", "configured": true, "models": [...] },
+    { "id": "deepseek", "configured": false, "models": [...] }
+  ]
+}
+```
+
+前端按 `configured` 把没配 key 的 provider 置灰禁用 —— 选了只会得到 401。
+
+### 17.4 顺带修掉的一个 UI 遮挡问题
+
+Next.js 开发浮标（`nextjs-portal`）会盖住模型切换器的图标区
+（`position: fixed` + `z-index: 2147483647`），点图标点不到。
+
+修复：`next.config.ts` 里 `devIndicators: false`。
+
+### 17.5 DeepSeek 启用方式（留的口子）
+
+```bash
+# backend/.env
+DEEPSEEK_API_KEY=sk-xxxxxxxx
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-pro
+```
+
+填完**重启后端**（配置是启动时读的）。前端会自动检测到并解锁该 provider。
+
+可用模型：`deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-chat` / `deepseek-reasoner`。
+
+### 17.6 新增文件
+
+```
+backend/app/agent/providers.py       # provider 解析与路由
+backend/app/api/models.py             # GET /api/models
+backend/tests/test_providers.py       # provider 路由（16 个）
+
+frontend/components/chat/ModelSwitcher.tsx   # 输入框旁的切换器
+```
+
+### 17.7 关于「前端硬编码 vs 后端提供」的教训
+
+模型名和「配没配 key」都是**后端状态** —— 前端无从得知。
+凡是这类「取决于服务端配置」的清单，都应该由后端提供接口，
+否则两边一定会漂移。
+
+M6 最初把模型名硬编码在前端，是一次典型的「看起来能用、实际是哑弹」的设计。

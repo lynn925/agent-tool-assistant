@@ -1,14 +1,20 @@
 "use client";
 
+import { Settings } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { MessageBubble } from "@/components/chat/MessageBubble";
+import { EmptyState } from "@/components/chat/EmptyState";
+import { ModelSwitcher } from "@/components/chat/ModelSwitcher";
 import { ThreadSwitcher } from "@/components/chat/ThreadSwitcher";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { chatStream, clearMemory, getMemory } from "@/lib/api";
+import { getSettings, saveSettings } from "@/lib/settings";
 import {
   type LocalThread,
   createThread,
@@ -43,6 +49,7 @@ interface RetryingState {
 }
 
 export default function HomePage() {
+  const router = useRouter();
   /** 聊天消息列表 */
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   /** 输入框内容 */
@@ -61,6 +68,50 @@ export default function HomePage() {
   const [clearing, setClearing] = useState(false);
   /** M5：当前正在重试的提示 */
   const [retrying, setRetrying] = useState<RetryingState | null>(null);
+  /** M6：聊天区的 viewport 元素，用于自动滚动 */
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  /** M6：用户是否手动往上滚了 —— 手动滚动后就不该再自动往下拽 */
+  const [pinnedToBottom, setPinnedToBottom] = useState(true);
+  /** M6：当前选中的模型（输入框旁边的切换器控制） */
+  const [model, setModel] = useState("");
+
+  /**
+   * M6：切换模型时同步到设置里 —— 这样刷新页面后选中的模型还在。
+   */
+  function onModelChange(next: string) {
+    setModel(next);
+    saveSettings({ ...getSettings(), model: next });
+  }
+
+  /**
+   * M6：自动滚动到底部。
+   *
+   * 两个细节：
+   *  1. 用 requestAnimationFrame 节流 —— 流式时每个 delta 都会触发一次，
+   *     不节流会抖。
+   *  2. 只在「用户本来就贴着底部」时才滚。手动往上翻历史时不该被拽回底部。
+   */
+  function scrollToBottom() {
+    if (!pinnedToBottom) return;
+    const el = viewportRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }
+
+  /**
+   * M6：监听用户的滚动，判断他是否还贴着底部。
+   *
+   * 距离底部 32px 以内算「贴着」—— 留一点余量，
+   * 否则滚动动画的最后一点点位移就会误判成「用户上翻了」。
+   */
+  function onViewportScroll() {
+    const el = viewportRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setPinnedToBottom(distance < 32);
+  }
 
   /**
    * 首次挂载：读出当前会话，加载它的历史消息。
@@ -69,8 +120,20 @@ export default function HomePage() {
     const id = getThreadId();
     setThreadIdState(id);
     setThreads(listLocalThreads());
+    // M6：恢复上次选中的模型
+    setModel(getSettings().model);
     void loadHistory(id);
   }, []);
+
+  /**
+   * M6：消息变化时自动滚到底部。
+   *
+   * 依赖整个 messages 数组 —— 流式时每来一个 delta 数组就变了，
+   * 于是会持续滚动，呈现"打字机往下推"的效果。
+   */
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
 
   /**
    * 加载某个会话的历史消息。
@@ -118,7 +181,32 @@ export default function HomePage() {
     e.preventDefault();
     const text = draft.trim();
     if (!text || sending) return;
+    setDraft("");
+    await sendMessage(text);
+  }
 
+  /**
+   * M6：空状态里点了示例 prompt —— 填进输入框。
+   *
+   * 只填不自动发 —— 让用户先看一眼再决定要不要改。
+   */
+  function onPickExample(prompt: string) {
+    setDraft(prompt);
+  }
+
+  /**
+   * M6：重发某条用户消息。
+   *
+   * 用**同一个 thread_id**，这样后端的记忆是连贯的 ——
+   * 重发不是在开新会话，而是在同一个会话里再问一次。
+   */
+  function onResend(text: string) {
+    if (sending) return;
+    void sendMessage(text);
+  }
+
+  /** 真正发一条消息（发送和重发共用） */
+  async function sendMessage(text: string) {
     setError(null);
     // 先把用户消息和一条空的助手消息占位放进列表
     const userMsg: ChatMessage = {
@@ -135,7 +223,6 @@ export default function HomePage() {
       toolCalls: [],
     };
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
-    setDraft("");
     setSending(true);
 
     const controller = new AbortController();
@@ -145,6 +232,9 @@ export default function HomePage() {
       // 建立 SSE 连接，把事件分发到状态更新
       await chatStream(text, threadId, {
         signal: controller.signal,
+        // M6：带上设置页里的设置（每次发送时读取，改完立刻生效）。
+        // 模型用切换器当前选中的值 —— 它比设置里的更实时。
+        settings: { ...getSettings(), model },
         onEvent: (event) => {
           switch (event.event) {
             // 文本片段：追加到消息末尾
@@ -310,11 +400,26 @@ export default function HomePage() {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-4 px-4 py-8">
       <header className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-semibold">Agent Tool Assistant</h1>
-          <p className="text-sm text-muted-foreground">
-            M5 · 多步任务编排 + 会话记忆 + 错误自动重试。
-          </p>
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex flex-col gap-1">
+            <h1 className="text-2xl font-semibold">Agent Tool Assistant</h1>
+            <p className="text-sm text-muted-foreground">
+              M6 · 多步任务编排 + 会话记忆 + 错误自动重试 + 暗色模式。
+            </p>
+          </div>
+          {/* M6：主题切换 + 设置入口 */}
+          <div className="flex shrink-0 items-center gap-1">
+            <ThemeToggle />
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => router.push("/settings")}
+              title="设置"
+              aria-label="设置"
+            >
+              <Settings />
+            </Button>
+          </div>
         </div>
         <ThreadSwitcher
           threads={threads}
@@ -328,15 +433,22 @@ export default function HomePage() {
 
       <Card className="flex-1">
         <CardContent className="p-0">
-          <ScrollArea className="h-[60vh] px-4 py-4">
+          <ScrollArea
+            className="h-[60vh] px-4 py-4"
+            viewportRef={viewportRef}
+            onScroll={onViewportScroll}
+          >
             {messages.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                还没有消息。试试「上海现在天气怎么样」或「帮我算一下 2+2*3」。
-              </p>
+              /* M6：空状态 —— 引导 + 三个示例 prompt */
+              <EmptyState onPick={onPickExample} />
             ) : (
               <ul className="flex flex-col gap-3">
                 {messages.map((m) => (
-                  <MessageBubble key={m.id} message={m} />
+                  <MessageBubble
+                    key={m.id}
+                    message={m}
+                    onResend={m.role === "user" ? onResend : undefined}
+                  />
                 ))}
               </ul>
             )}
@@ -362,6 +474,9 @@ export default function HomePage() {
 
       {/* 输入区 */}
       <form onSubmit={onSubmit} className="flex gap-2">
+        {/* M6：模型切换器，放在输入框左边 —— 随时可切 */}
+        <ModelSwitcher value={model} onChange={onModelChange} />
+
         <Input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}

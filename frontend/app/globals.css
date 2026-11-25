@@ -1,5 +1,16 @@
 @import "tailwindcss";
 
+/* 把 dark: 变体从「跟随系统」改成「跟随 .dark 类」。
+ *
+ * Tailwind v4 的默认行为是 @media (prefers-color-scheme: dark)，
+ * 那样只能跟随系统、没法手动切换。而下面写的是 `.dark { ... }`，
+ * 需要手动给 <html> 加 .dark 类才能生效 —— 两者对不上，
+ * 代码里的 dark:text-red-400 这类类名会静默失效。
+ *
+ * 这一行是整个暗色模式的地基：不加的话做多少暗色 UI 都是白工。
+ */
+@custom-variant dark (&:is(.dark *));
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

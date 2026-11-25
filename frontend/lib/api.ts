@@ -4,6 +4,7 @@
  * M2 的核心是 chatStream —— 负责把 SSE 流解析成一个个事件回调给调用方。
  */
 
+import type { Settings } from "@/lib/settings";
 import type { ChatEvent } from "@/lib/types";
 
 /** 后端地址，在 frontend/.env 里用 NEXT_PUBLIC_BACKEND_URL 配置 */
@@ -63,6 +64,8 @@ export interface ChatHandlers {
   onEvent: (event: ChatEvent) => void;
   /** 中止信号，配合 AbortController 实现"停止"按钮 */
   signal?: AbortSignal;
+  /** M6：本次请求要覆盖的设置（来自设置页） */
+  settings?: Settings;
 }
 
 /**
@@ -76,12 +79,23 @@ export interface ChatHandlers {
 export async function chatStream(
   message: string,
   threadId: string,
-  { onEvent, signal }: ChatHandlers,
+  { onEvent, signal, settings }: ChatHandlers,
 ): Promise<void> {
   const res = await fetch(`${BACKEND_URL}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, thread_id: threadId }),
+    // M6：把设置一起发过去。不传就用后端的全局默认值。
+    body: JSON.stringify({
+      message,
+      thread_id: threadId,
+      ...(settings
+        ? {
+            model: settings.model,
+            temperature: settings.temperature,
+            retry_max_attempts: settings.retryMaxAttempts,
+          }
+        : {}),
+    }),
     signal,
   });
 
@@ -189,4 +203,29 @@ export async function clearMemory(
 /** 列出所有会话 */
 export async function listThreads(): Promise<{ threads: ThreadInfo[] }> {
   return request("/api/threads");
+}
+
+// ---------------------------------------------------------------------------
+// M6 模型列表
+// ---------------------------------------------------------------------------
+
+/** 一个模型服务商 */
+export interface ProviderInfo {
+  id: string;
+  label: string;
+  /** 有没有配 API key —— 没配的话前端会置灰，不让选 */
+  configured: boolean;
+  default_model: string;
+  models: string[];
+}
+
+/** 模型列表接口的返回 */
+export interface ModelsResponse {
+  default_model: string;
+  providers: ProviderInfo[];
+}
+
+/** 获取所有 provider 及其模型列表 */
+export async function listModels(): Promise<ModelsResponse> {
+  return request("/api/models");
 }

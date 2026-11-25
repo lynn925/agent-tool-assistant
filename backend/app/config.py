@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_base_url: str | None = None
 
+    # DeepSeek —— 可选的第二个 provider。
+    # 留空就不启用，用户在前端选 DeepSeek 模型时会得到清晰提示。
+    deepseek_api_key: str = "sk-238a6b6600144b59ba0272634d830273"
+    deepseek_base_url: str = "https://api.deepseek.com"
+    #: DeepSeek 默认模型（前端切到 deepseek 时用它，除非用户指定了具体模型）
+    deepseek_model: str = "deepseek-v4-pro"
+
     # SerpAPI (M2 search tool, optional in M1)
     serpapi_api_key: str = ""
 

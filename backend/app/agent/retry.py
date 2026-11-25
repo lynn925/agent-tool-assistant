@@ -155,6 +155,32 @@ class RetryOutcome:
         return self.error is None
 
 
+def _max_retries(default: int | None = None) -> int:
+    """确定这次调用的重试次数上限。
+
+    优先级：请求级覆盖（M6 设置页）> 全局配置 > 传入的默认值。
+
+    请求级覆盖从 LangGraph 的 configurable 里读 —— 这样每个请求独立，
+    不会污染全局配置。
+    """
+    if default is not None:
+        return default
+
+    # 请求级覆盖
+    try:
+        from langgraph.config import get_config
+
+        overrides = (get_config().get("configurable") or {})
+        value = overrides.get("retry_max_attempts")
+        if value is not None:
+            return int(value)
+    except Exception:
+        # 不在图里跑（单元测试直接调）就跳到全局配置
+        pass
+
+    return get_settings().retry_max_attempts
+
+
 def _build_retrying(
     *,
     max_retries: int,
@@ -202,8 +228,7 @@ async def run_with_retry(
       on_retry    每次准备重试前的回调（用于实时推送 SSE 事件）
       wait        退避策略，测试时可传 wait_none() 跳过等待
     """
-    if max_retries is None:
-        max_retries = get_settings().retry_max_attempts
+    max_retries = _max_retries(max_retries)
 
     report = RetryReport()
 
@@ -248,8 +273,7 @@ async def run_tool_with_retry(
     注意：openai SDK 自带 2 次重试（max_retries 默认值），
     但工具层用的是 httpx 直连，不受影响。
     """
-    if max_retries is None:
-        max_retries = get_settings().retry_max_attempts
+    max_retries = _max_retries(max_retries)
 
     report = RetryReport()
 

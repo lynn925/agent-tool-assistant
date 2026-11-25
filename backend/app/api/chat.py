@@ -19,7 +19,7 @@ M5 新增：
 
 import json
 import uuid
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, HTTPException
 from langchain_core.messages import HumanMessage
@@ -42,6 +42,15 @@ class ChatRequest(BaseModel):
     #: 会话 ID。M4 起必传 —— 它决定读写哪个会话的记忆。
     #: 传空字符串会返回 400。
     thread_id: str = Field(..., min_length=1, max_length=100)
+
+    # M6：可选的运行时覆盖（来自前端的设置页）。
+    # 不传就用后端 .env 里的全局默认值 —— 所以旧客户端不受影响。
+    #: 模型名。传空字符串视为不覆盖。
+    model: str | None = Field(default=None, max_length=100)
+    #: 聚合器温度。0~1。
+    temperature: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: 最大重试次数（不含首次尝试）。0~5。
+    retry_max_attempts: int | None = Field(default=None, ge=0, le=5)
 
 
 def _sse(event: str, data: dict) -> dict:
@@ -71,7 +80,52 @@ def _step_payload(step: dict) -> dict:
     }
 
 
-async def _stream_events(user_message: str, thread_id: str) -> AsyncIterator[dict]:
+def _friendly_error(exc: Exception) -> str:
+    """把底层异常翻译成用户能看懂、能行动的信息。
+
+    M6：设置页能改模型名了，所以「模型不存在」是最常见的错误。
+    上游返回的是这种：
+        OpenAIInvalidRequestError: Error code: 400 - {... 'invalid params,
+        unknown model 'gpt-4o-mini' (2013)' ...}
+    直接甩给用户毫无意义 —— 要告诉他「模型名不对，去设置页改一下」。
+    """
+    # provider 没配 key —— 最常见的「选了个用不了的模型」
+    from app.agent.providers import ProviderNotConfigured
+
+    if isinstance(exc, ProviderNotConfigured):
+        return str(exc)
+
+    raw = str(exc)
+
+    # 模型不存在 —— 设置页填错了模型名
+    if "unknown model" in raw:
+        import re
+
+        m = re.search(r"unknown model '([^']+)'", raw)
+        name = m.group(1) if m else "该模型"
+        return (
+            f"模型「{name}」不可用。"
+            "请到设置页确认模型名是否正确，"
+            "或改回当前 provider 支持的模型。"
+        )
+
+    # 鉴权失败
+    if "Incorrect API key" in raw or "invalid_api_key" in raw:
+        return "API Key 无效，请检查 backend/.env 里的 OPENAI_API_KEY。"
+
+    # 额度用尽
+    if "insufficient" in raw.lower() or "quota" in raw.lower():
+        return "API 额度不足，请充值或更换服务商。"
+
+    # 其它错误：保留原始信息但去掉冗长的前缀
+    return f"{type(exc).__name__}: {raw}"
+
+
+async def _stream_events(
+    user_message: str,
+    thread_id: str,
+    overrides: ChatRequest | None = None,
+) -> AsyncIterator[dict]:
     """驱动整张图，把它的输出翻译成 SSE 事件。
 
     M3 只用 "custom" 模式 —— 接收节点里用 get_stream_writer() 推的事件：
@@ -86,6 +140,10 @@ async def _stream_events(user_message: str, thread_id: str) -> AsyncIterator[dic
 
     M4 的变化：图带上了 checkpointer，config 里指定 thread_id，
     于是这个会话的历史消息会被自动带上，模型能记住之前聊过什么。
+
+    M6 的变化：运行时覆盖（模型/温度/重试次数）放进 configurable。
+    这样每个请求独立生效 —— 不会因为改了一次设置就污染全局，
+    也不会让并发请求互相干扰。
     """
     message_id = str(uuid.uuid4())
     # 第一条事件：告诉前端"助手消息开始了"
@@ -94,14 +152,23 @@ async def _stream_events(user_message: str, thread_id: str) -> AsyncIterator[dic
     checkpointer = await get_checkpointer()
     graph = build_graph_with_memory(checkpointer)
 
+    # 只把真正传了的值放进 configurable ——
+    # 没传的保持 None，节点里就会回退到全局默认值。
+    configurable: dict[str, Any] = {"thread_id": thread_id}
+    if overrides.model:
+        configurable["model"] = overrides.model
+    if overrides.temperature is not None:
+        configurable["temperature"] = overrides.temperature
+    if overrides.retry_max_attempts is not None:
+        configurable["retry_max_attempts"] = overrides.retry_max_attempts
+
     try:
         async for chunk in graph.astream(
             {"messages": [HumanMessage(content=user_message)]},
             stream_mode="custom",
             config={
                 "recursion_limit": RECURSION_LIMIT,
-                # thread_id 决定这次对话读写哪个会话的记忆
-                "configurable": {"thread_id": thread_id},
+                "configurable": configurable,
             },
         ):
             if not isinstance(chunk, dict):
@@ -170,7 +237,7 @@ async def _stream_events(user_message: str, thread_id: str) -> AsyncIterator[dic
             "error",
             {
                 "code": "agent_failed" if retriable else "agent_error",
-                "message": f"{type(exc).__name__}: {exc}",
+                "message": _friendly_error(exc),
                 "retriable": retriable,
             },
         )
@@ -194,6 +261,6 @@ async def chat(req: ChatRequest) -> EventSourceResponse:
         )
 
     return EventSourceResponse(
-        _stream_events(req.message, req.thread_id),
+        _stream_events(req.message, req.thread_id, req),
         media_type="text/event-stream",
     )
