@@ -1,0 +1,23 @@
+# Agent 评测任务集（20 条复合任务；每条独立 thread_id，无历史干扰）
+# task: 给 Agent 的指令；expect_tools: 预期工具（仅供人工核对，不参与评分）
+# 说明：涉及内部文档的任务请先启动 RAG 服务（:8001），并在 backend/.env 配好 RAG_API_URL
+{"task": "查一下上海今天的天气，然后总结适合穿什么衣服", "expect_tools": ["get_weather"]}
+{"task": "帮我算 128 乘以 7 再除以 4 等于多少，然后查一下上海的天气", "expect_tools": ["calculate", "get_weather"]}
+{"task": "查北京和广州今天的天气，比较哪个城市更热，并给出温差", "expect_tools": ["get_weather", "calculate"]}
+{"task": "先算 (35 + 17) * 6 的结果，再把结果乘以 0.5", "expect_tools": ["calculate"]}
+{"task": "搜索 LangGraph 的最新版本特性，再用一句话总结", "expect_tools": ["web_search"]}
+{"task": "搜索上海今天的最高气温预告，和天气工具返回的实时温度做个对比", "expect_tools": ["web_search", "get_weather"]}
+{"task": "查一下深圳的天气，如果温度超过 28 度，再查一下广州的天气做对比", "expect_tools": ["get_weather"]}
+{"task": "帮我算 123456 乘以 789，然后搜索一下这个计算在科学计数法下怎么表示", "expect_tools": ["calculate", "web_search"]}
+{"task": "在内部文档里查一下文档切分策略是怎么描述的，总结成两句话", "expect_tools": ["search_docs"]}
+{"task": "查内部文档里关于 Reranker 的内容，并说明它默认是否开启", "expect_tools": ["search_docs"]}
+{"task": "先从内部文档查引用角标的实现方式，再搜索一下前端实现引用跳转的常见做法，对比两者", "expect_tools": ["search_docs", "web_search"]}
+{"task": "查内部文档里关于无答案题拒答的处理，再用一两句话解释这样做的意义", "expect_tools": ["search_docs"]}
+{"task": "查一下杭州的天气，同时在内部文档里找一下有没有和天气相关的示例，把两者放在一起说", "expect_tools": ["get_weather", "search_docs"]}
+{"task": "算一下 2 的 10 次方加上 3 的 5 次方，然后查一下成都的天气", "expect_tools": ["calculate", "get_weather"]}
+{"task": "搜索 FastAPI 的流式响应实现方式，然后总结成三条要点", "expect_tools": ["web_search"]}
+{"task": "在内部文档里查 BGE Embedding 的选型理由，再查一下 Chroma 向量库的特点，合并成一段说明", "expect_tools": ["search_docs"]}
+{"task": "查南京今天的天气，算一下华氏度是多少，并说明计算过程", "expect_tools": ["get_weather", "calculate"]}
+{"task": "先搜索一下 tenacity 指数退避的用法，再算 1+2+4+8 等于多少", "expect_tools": ["web_search", "calculate"]}
+{"task": "查内部文档里有没有关于 P95 延迟的内容，如果有总结出来，没有就明确说没有", "expect_tools": ["search_docs"]}
+{"task": "查武汉的天气，查内部文档里的测试集条数，再算一下如果每天跑 20 次，一周一共跑多少次", "expect_tools": ["get_weather", "search_docs", "calculate"]}

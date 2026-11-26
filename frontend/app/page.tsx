@@ -407,7 +407,7 @@ export default function HomePage() {
           <div className="flex flex-col gap-1">
             <h1 className="text-2xl font-semibold">Agent Tool Assistant</h1>
             <p className="text-sm text-muted-foreground">
-              M6 · 多步任务编排 + 会话记忆 + 错误自动重试 + 暗色模式。
+              LangGraph 多步任务编排 · 会话记忆 · 失败自动重试 · RAG 文档检索
             </p>
           </div>
           {/* M6：主题切换 + 设置入口 */}
