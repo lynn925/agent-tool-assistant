@@ -101,3 +101,45 @@ def test_should_continue_after_failed_step() -> None:
 def test_should_continue_with_empty_plan() -> None:
     """空计划直接去汇总。"""
     assert should_continue({"plan": [], "current_step": 0}) == "aggregator"
+
+
+# ---------------------------------------------------------------------------
+# SSE 事件快照
+# ---------------------------------------------------------------------------
+
+def test_executor_step_events_are_snapshots(monkeypatch) -> None:
+    """每条 step 事件必须是当时的快照，不能被后续修改污染。
+
+    回归测试：writer 传出去的是**引用**，
+    之前 executor 把同一个 dict 传了两次，
+    消费端序列化时看到的都是最终值 —— 「running」状态凭空消失，
+    前端看不到「正在检索文档」的中间态。
+    """
+    import asyncio
+
+    from app.agent import nodes as nodes_module
+
+    captured: list[dict] = []
+
+    class _FakeWriter:
+        def __call__(self, payload: dict) -> None:
+            captured.append(payload)
+
+    monkeypatch.setattr(nodes_module, "get_stream_writer", lambda: _FakeWriter())
+
+    step = {
+        "id": "step-1",
+        "description": "检索文档",
+        "tool": None,
+        "args": {},
+        "status": "pending",
+        "result": None,
+        "error": None,
+        "retry": 0,
+    }
+
+    asyncio.run(nodes_module.executor_node({"plan": [step], "current_step": 0}))
+
+    statuses = [c["step"]["status"] for c in captured if c.get("event") == "step"]
+    assert statuses == ["running", "done"]
+

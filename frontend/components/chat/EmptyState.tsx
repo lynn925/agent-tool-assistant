@@ -19,14 +19,14 @@ export const EXAMPLE_PROMPTS = [
     prompt: "上海现在天气怎么样？",
   },
   {
-    icon: Globe,
-    label: "联网搜索",
-    prompt: "帮我搜一下 LangGraph 的官方教程",
-  },
-  {
     icon: Calculator,
     label: "算一算",
     prompt: "帮我算一下 (123 + 456) * 789",
+  },
+  {
+    icon: Globe,
+    label: "联网搜索",
+    prompt: "帮我搜一下 LangGraph 的官方教程",
   },
 ] as const;
 
@@ -46,14 +46,16 @@ export function EmptyState({ onPick }: { onPick: (prompt: string) => void }) {
           <Button
             key={prompt}
             variant="outline"
-            className="h-auto flex-col items-start gap-1.5 py-3 text-left"
+            className="h-auto w-full min-w-0 flex-col items-start gap-1.5 whitespace-normal py-3 text-left"
             onClick={() => onPick(prompt)}
           >
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Icon className="size-3.5" />
               {label}
             </span>
-            <span className="line-clamp-2 text-sm font-normal leading-snug">
+            {/* whitespace-normal 覆盖 Button 基类的 nowrap，
+                min-w-0 + break-words 让长 prompt 在按钮内换行而不是溢出 */}
+            <span className="line-clamp-2 w-full min-w-0 break-words text-sm font-normal leading-snug">
               {prompt}
             </span>
           </Button>

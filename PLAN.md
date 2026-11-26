@@ -15,6 +15,7 @@
 | M4 | 记忆（Checkpointer） | ✅ 已完成 |
 | M5 | 错误恢复（重试） | ✅ 已完成 |
 | M6 | UI 完善（不含部署） | ✅ 已完成 |
+| 附加 | RAG 接入（外部文档检索工具） | ✅ 已完成 |
 
 ---
 
@@ -107,6 +108,16 @@ frontend/
 | 黑名单 | `__`, `import`, `os`, `sys`, `exec`, `eval(`, `open(`, `subprocess`, `lambda`, `;`, `\n` |
 | 实现 | 黑名单预过滤 → `sympy.sympify(expr).evalf()` → `str` + `latex()` |
 | 测试 | `2+2*3` / `sqrt(2)` / `import os` / `1/0` |
+
+### 3.4 `search_docs`（RAG 接入后新增，详见 §18）
+| 项 | 内容 |
+|---|---|
+| 入参 | `query: str`, `top_k: int = 5`（1~10）, `doc_id: str \| None` |
+| 出参（成功） | `{results: [{source, page, text, similarity, doc_id}], count, sources}` |
+| 出参（失败） | `{error: "empty_query" \| "rag_not_configured" \| "rag_timeout" \| "rag_unavailable" \| "rag_error"}` |
+| 实现 | `httpx` → `POST {RAG_API_URL}/api/search`（外部 RAG 服务） |
+| 超时 | 30s |
+| 备注 | 失败不抛异常，返回错误字典让 LLM 改用别的方案 |
 
 ---
 
@@ -943,3 +954,166 @@ frontend/components/chat/ModelSwitcher.tsx   # 输入框旁的切换器
 否则两边一定会漂移。
 
 M6 最初把模型名硬编码在前端，是一次典型的「看起来能用、实际是哑弹」的设计。
+
+---
+
+## 18. RAG 接入（外部文档检索）
+
+### 18.1 起因
+
+用户：「我有一个 rag 的文档系统，能接入进来吗？」
+
+已有的 RAG 项目：`/Users/xinao/Desktop/ai-project/doc-analysis-rag`
+（FastAPI + Chroma + 本地 HuggingFace `BAAI/bge-small-zh-v1.5`，7 篇文档 / 20 个向量）
+
+### 18.2 两种接法的取舍（用户已确认选 A）
+
+| | A. HTTP（**已选**） | B. 直接 import 内部函数 |
+|---|---|---|
+| 耦合 | 靠一个 JSON 契约解耦 | 绑死对方的模块结构和路径 |
+| 部署 | 两个服务独立起 | 必须同进程、同一 venv |
+| 对方改动 | 不影响 agent | 内部重构就可能崩 |
+| 延迟 | 多一次本地 HTTP（~1ms 量级） | 进程内调用 |
+| 能力边界 | 只能用对方暴露出来的 | 能直接调内部函数 |
+
+RAG 项目本身就是独立部署的 FastAPI 服务，加 HTTP 端点是最自然的接法。
+
+### 18.3 RAG 项目侧：新增 `POST /api/search`
+
+**只做检索，不生成答案。**
+
+RAG 自己的 `/api/chat` 是「检索 + 生成」打包的，但 agent 本来就要自己调 LLM 汇总 ——
+走那条路等于跑两次 LLM（成本翻倍、延迟叠加），而且拿到的已是二手答案，没法溯源。
+
+新增 [search.py](file:///Users/xinao/Desktop/ai-project/doc-analysis-rag/backend/app/api/search.py)：
+
+```
+请求  {"query": str, "top_k": int = 5, "doc_id": str | null}
+响应  {"results": [...], "count": int, "sources": [str]}
+```
+
+每条 result 的结构：
+
+```json
+{
+  "doc_id": "9e54...",
+  "chunk_index": 2,
+  "page": 1,
+  "source": "prd-rules.md",
+  "text": "...",
+  "score": 0.9227,
+  "similarity": 0.5743,
+  "rerank_score": 0.4902
+}
+```
+
+- `score` 是 Chroma 的 L2 距离（越小越相似）
+- `similarity` 是换算后的余弦相似度（越大越相似）
+- `rerank_score` 有值说明过了 cross-encoder 重排；模型不可用时降级返回前 top_k
+
+### 18.4 端口：RAG 从 8000 改到 8001
+
+agent 后端占着 8000。RAG 项目把 `APP_PORT` / `vite` 代理 / 前端 API base
+统一改到 8001（`package.json`、`start-backend.sh`、`.env`、`.env.example`、`vite.config.ts`、`src/lib/api.ts`）。
+
+### 18.5 agent 侧：`search_docs` 工具
+
+新增 [rag.py](file:///Users/xinao/Desktop/ai-project/agent-tool-assistant/backend/app/agent/tools/rag.py)：
+
+| 项 | 内容 |
+|---|---|
+| 入参 | `query: str`, `top_k: int = 5`（钳到 1~10）, `doc_id: str \| None` |
+| 出参（成功） | `{results: [{source, page, text, similarity, doc_id}], count, sources}` |
+| 出参（失败） | `{error: "empty_query" \| "rag_not_configured" \| "rag_timeout" \| "rag_unavailable" \| "rag_error"}` |
+| 实现 | `httpx.AsyncClient` → `POST {RAG_API_URL}/api/search` |
+| 超时 | 30s |
+
+**裁剪**：单个 chunk 最多留 1500 字符。
+一个 chunk 可能上千字，全塞进提示词会挤爆上下文 —— 完整的原文可以再查一次。
+
+**失败也返回字典，不抛异常** —— 和另外两个工具一致：
+工具失败不能让整个链路崩掉，要让 LLM 读到「搜不了」然后改用别的方案。
+
+### 18.6 重试层的契约
+
+`rag_timeout` / `rag_unavailable` 加进 `is_transient_tool_result` 的可重试码
+（和 `timeout` / `upstream_error` 同级）。
+
+`rag_not_configured` / `empty_query` **不重试** —— 重试也没用。
+
+### 18.7 planner 的提示词
+
+```
+- search_docs: 参数 {"query": "检索关键词", "top_k": 5, "doc_id": null}，在内部文档库中检索原文片段
+
+规则：
+5. 涉及内部文档、PRD、规范、规则、字段定义等公司/项目内部资料的问题，必须先用 search_docs 检索；
+   只有当问题明确指向互联网公开信息（如天气、实时新闻）时才用 web_search
+6. search_docs 的 query 要用文档里可能出现的术语或原文片段，不要用口语化的整句提问
+```
+
+第 5 条是关键 —— 不然 planner 会把「金额类字段用什么类型」也丢给 `web_search`，
+去网上搜数据库设计规范，而不是查公司自己的 PRD。
+
+### 18.8 配置
+
+```bash
+# backend/.env
+RAG_API_URL=http://localhost:8001
+```
+
+留空 = 不启用，`search_docs` 返回 `{"error": "rag_not_configured"}`。
+
+### 18.9 端到端实测结果
+
+问「金额类字段推荐用什么类型？」：
+
+```
+plan_update  step-1 = search_docs(query="金额 字段 类型 金额类", top_k=5)
+step_update  step-1 running → done
+tool_result  ok=true, count=5, sources=["prd-rules.md", "三方施工统计分析-行业监管部门页面说明.md"]
+             命中片段含「金额类 / 单价、总额 / DECIMAL(16,2)」
+
+最终回答：金额类字段（如单价、总额）推荐使用 DECIMAL(16,2)，
+         避免使用 FLOAT/DOUBLE，以保证金额计算的准确性。
+```
+
+反例「今天北京天气怎么样？」→ 走 `get_weather`，不触发 `search_docs`。
+
+### 18.10 顺带修掉的两个既有 bug
+
+**Bug 1：SSE 的 step 事件被后续修改污染。**
+
+`writer()` 传出去的是**引用**。executor 把同一个 dict 传了两次
+（`running` 一次、`done` 一次），两次推送之间没有 `await`，
+消费端序列化时看到的已经是最终值 —— **`running` 状态凭空消失**。
+
+修法：`writer({"event": "step", "step": dict(step)})` —— 传副本。
+
+这个 bug 从 M3 就有，只是之前无工具步骤（`tool=null`）会连续推两次相同状态，
+肉眼看不出来。接入 RAG 后步骤变多、用户会盯着「正在检索文档」，
+才暴露出来。回归测试见 `test_executor_step_events_are_snapshots`。
+
+**Bug 2：`TOOL_LABELS` 抄了两份。**
+
+`PlanPanel.tsx` 和 `ToolCallCard.tsx` 各有一份工具名 → 中文名的映射。
+加 `search_docs` 时漏改 PlanPanel 那份，导致计划面板不显示「文档检索」标签
+（浏览器实测发现）。修法：抽到 `frontend/lib/types.ts` 统一导出。
+
+### 18.11 前端展示
+
+`ToolCallCard` 对 RAG 结果做了专门渲染 —— 而不是甩一大坨 JSON：
+
+- 收起时多一个「N 条片段」徽章
+- 展开后逐条显示：来源文件名 / 页码 / 相似度 / 正文
+
+### 18.12 新增文件
+
+```
+backend/app/agent/tools/rag.py     # search_docs 工具
+backend/tests/test_rag.py           # 15 个测试
+
+frontend/lib/types.ts               # 统一导出 TOOL_LABELS
+```
+
+（doc-analysis-rag 侧：`backend/app/api/search.py`）

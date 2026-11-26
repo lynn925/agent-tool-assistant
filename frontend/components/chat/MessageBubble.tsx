@@ -4,6 +4,7 @@ import { Bot, RotateCcw, User } from "lucide-react";
 import { useState } from "react";
 
 import type { ChatMessage } from "@/lib/types";
+import { Markdown } from "@/components/chat/Markdown";
 import { PlanPanel } from "@/components/chat/PlanPanel";
 import { StreamingDots } from "@/components/chat/StreamingDots";
 import { ToolCallCard } from "@/components/chat/ToolCallCard";
@@ -66,7 +67,11 @@ export function MessageBubble({
             ) : (
               <>
                 {/* 折叠时只显示开头 */}
-                {shouldFold ? `${text.slice(0, FOLD_THRESHOLD)}…` : text}
+                {shouldFold ? (
+                  <span>{text.slice(0, FOLD_THRESHOLD)}…</span>
+                ) : (
+                  <Markdown content={text} />
+                )}
               </>
             )}
           </div>

@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     # SerpAPI (M2 search tool, optional in M1)
     serpapi_api_key: str = ""
 
+    # 外部 RAG 服务的地址（文档检索工具）。
+    # 留空则 search_docs 工具返回 {"error": "rag_not_configured"}。
+    # 例：http://localhost:8001（doc-analysis-rag 的后端端口）
+    rag_api_url: str = ""
+
     # CORS
     frontend_origin: str = "http://localhost:3000"
 

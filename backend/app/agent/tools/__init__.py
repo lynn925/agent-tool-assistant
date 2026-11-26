@@ -14,6 +14,7 @@ from typing import Any
 from langchain_core.tools import BaseTool, StructuredTool
 
 from app.agent.tools.calculator import calculate
+from app.agent.tools.rag import search_docs
 from app.agent.tools.search import web_search
 from app.agent.tools.weather import get_weather
 
@@ -63,6 +64,15 @@ def _stamp(result: Any, started: float) -> Any:
 
 #: 全部工具。graph.py 通过 bind_tools(ALL_TOOLS) 把它们交给模型。
 #: 新增工具时只需要在这里加一行。
-ALL_TOOLS = [_with_latency(tool) for tool in (get_weather, web_search, calculate)]
+ALL_TOOLS = [
+    _with_latency(tool)
+    for tool in (get_weather, web_search, calculate, search_docs)
+]
 
-__all__ = ["ALL_TOOLS", "calculate", "get_weather", "web_search"]
+__all__ = [
+    "ALL_TOOLS",
+    "calculate",
+    "get_weather",
+    "search_docs",
+    "web_search",
+]

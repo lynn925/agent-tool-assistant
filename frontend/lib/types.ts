@@ -8,6 +8,19 @@
  * 协议出处：PLAN.md §4（事件）与 §8（前端类型）
  */
 
+/**
+ * 工具名 → 中文显示名。
+ *
+ * 放在这里而不是各组件内部 —— 之前 PlanPanel 和 ToolCallCard
+ * 各有一份，加新工具时漏改一处就导致标签不一致。
+ */
+export const TOOL_LABELS: Record<string, string> = {
+  get_weather: "查询天气",
+  web_search: "联网搜索",
+  calculate: "计算器",
+  search_docs: "文档检索",
+};
+
 /** 消息角色：用户或助手 */
 export type Role = "user" | "assistant";
 

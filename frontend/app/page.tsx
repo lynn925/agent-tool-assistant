@@ -242,7 +242,10 @@ export default function HomePage() {
               const delta = event.data.delta;
               updateAssistant(assistantId, (msg) => ({
                 ...msg,
-                text: msg.text + delta,
+                // 模型经常在正文前带一两个换行（"\n\n(123 + 456)..."）。
+                // 流式时不能 trim —— 那会把中间的分段也吃掉，
+                // 只削掉**开头**的空白，正文内容一个字符不动。
+                text: msg.text ? msg.text + delta : delta.replace(/^\s+/, ""),
               }));
               break;
             }
@@ -398,8 +401,8 @@ export default function HomePage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-4 px-4 py-8">
-      <header className="flex flex-col gap-3">
+    <main className="mx-auto flex h-dvh w-full max-w-3xl flex-col gap-4 overflow-hidden px-4 py-6">
+      <header className="flex shrink-0 flex-col gap-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex flex-col gap-1">
             <h1 className="text-2xl font-semibold">Agent Tool Assistant</h1>
@@ -431,10 +434,10 @@ export default function HomePage() {
         />
       </header>
 
-      <Card className="flex-1">
-        <CardContent className="p-0">
+      <Card className="flex flex-1 flex-col overflow-hidden">
+        <CardContent className="min-h-0 flex-1 p-0">
           <ScrollArea
-            className="h-[60vh] px-4 py-4"
+            className="h-full px-4 py-4"
             viewportRef={viewportRef}
             onScroll={onViewportScroll}
           >
@@ -458,7 +461,7 @@ export default function HomePage() {
 
       {/* M5：重试提示。放在消息区下方，输入框上方 —— 不打断阅读流 */}
       {retrying ? (
-        <p className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400">
+        <p className="flex shrink-0 items-center gap-2 text-xs text-amber-600 dark:text-amber-400">
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
           {retrying.layer === "tool"
             ? `${retrying.name ?? "工具"} 调用失败，正在重试（第 ${retrying.attempt}/${retrying.maxAttempts - 1} 次）`
@@ -469,11 +472,11 @@ export default function HomePage() {
 
       {/* 顶层错误提示 */}
       {error ? (
-        <p className="text-sm text-destructive">{error}</p>
+        <p className="shrink-0 text-sm text-destructive">{error}</p>
       ) : null}
 
       {/* 输入区 */}
-      <form onSubmit={onSubmit} className="flex gap-2">
+      <form onSubmit={onSubmit} className="flex shrink-0 gap-2">
         {/* M6：模型切换器，放在输入框左边 —— 随时可切 */}
         <ModelSwitcher value={model} onChange={onModelChange} />
 

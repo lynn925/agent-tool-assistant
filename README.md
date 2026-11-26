@@ -10,6 +10,7 @@
 | M4 | 记忆（Checkpointer） | ✅ 已完成 |
 | M5 | 错误恢复（重试） | ✅ 已完成 |
 | M6 | UI 完善（不含部署） | ✅ 已完成 |
+| 附加 | RAG 接入（外部文档检索） | ✅ 已完成 |
 
 ## 架构
 
@@ -68,6 +69,7 @@ npm run dev
 - ✅ 空状态引导 + 示例 prompt、头像、流式动画、长消息折叠
 - ✅ 自动滚动到底部、单条消息重发
 - ✅ 设置页：模型 / 温度 / 重试上限（纯前端，随请求发给后端）
+- ✅ RAG 文档检索：接入外部 RAG 服务，问内部文档问题自动走 `search_docs`
 
 ### M3 的执行流程
 
@@ -114,8 +116,11 @@ SqliteSaver 读写 data/checkpoints.db
 | `get_weather` | `city` | `{city, temp_c, condition, humidity, wind_kph, observed_at}` | `{error: "city_not_found" \| "timeout" \| "upstream_error"}` |
 | `web_search` | `query`, `num=5` | `[{title, snippet, url}]` | `{error: "serpapi_key_missing"}` |
 | `calculate` | `expression` | `{result, latex}` | `{error: "forbidden_keyword" \| "syntax_error" \| "evaluation_error"}` |
+| `search_docs` | `query`, `top_k=5`, `doc_id` | `{results: [{source, page, text, similarity, doc_id}], count, sources}` | `{error: "empty_query" \| "rag_not_configured" \| "rag_timeout" \| "rag_unavailable" \| "rag_error"}` |
 
 > `web_search` 需要在 `backend/.env` 填入 `SERPAPI_API_KEY`；未配置时返回错误字典，不会抛异常。
+>
+> `search_docs` 需要在 `backend/.env` 填入 `RAG_API_URL`（外部 RAG 服务地址），见下方「RAG 接入」。
 
 ### M5 的错误恢复机制
 
@@ -202,6 +207,39 @@ DEEPSEEK_API_KEY=sk-xxxxxxxx
 ```
 
 配合 `next-themes` 的 `attribute="class"`，就能用 `.dark` 类驱动了。
+
+### RAG 接入（外部文档检索）
+
+`search_docs` 工具通过 HTTP 调用外部 RAG 服务的 `POST /api/search`，
+拿回**原文片段**（chunk），由 agent 自己的 LLM 组织答案。
+
+```
+planner 判断这是内部文档问题
+  ↓
+search_docs → POST {RAG_API_URL}/api/search  {query, top_k, doc_id}
+  ↓
+返回 chunks：{source, page, text, similarity, doc_id}
+  ↓
+aggregator 用这些片段写最终答案
+```
+
+**配置**（`backend/.env`）：
+
+```bash
+RAG_API_URL=http://localhost:8001
+```
+
+留空 = 不启用，工具返回 `{"error": "rag_not_configured"}`。
+
+**关键点**：RAG 侧只做检索、不生成答案。
+如果走 RAG 自带的「检索 + 生成」接口，等于跑两次 LLM ——
+成本翻倍、延迟叠加，而且拿到的已是二手答案，没法溯源。
+
+planner 的提示词里明确区分了 `search_docs`（内部文档）和 `web_search`（互联网公开信息），
+否则问「金额字段用什么类型」会去网上搜数据库规范，而不是查公司自己的 PRD。
+
+核心逻辑在 [rag.py](file:///Users/xinao/Desktop/ai-project/agent-tool-assistant/backend/app/agent/tools/rag.py)，
+接入细节见 [PLAN.md §18](file:///Users/xinao/Desktop/ai-project/agent-tool-assistant/PLAN.md)。
 
 ## 技术栈
 

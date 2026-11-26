@@ -111,19 +111,29 @@ def is_transient_tool_result(result: Any) -> bool:
       timeout        请求超时
       upstream_error 上游 5xx / 网络异常
       upstream_rate_limited 上游限流
+      rag_timeout    RAG 检索超时
+      rag_unavailable RAG 服务连不上
 
     不可重试的错误码（重试也没用）：
       city_not_found 城市不存在 —— 再查一百次还是不存在
       forbidden_keyword / syntax_error / evaluation_error 表达式本身有问题
       serpapi_key_missing 没配 key
       serpapi_error   SerpAPI 额度用尽等
+      rag_not_configured 没配 RAG 地址
+      empty_query     查询词是空的
     """
     if not isinstance(result, dict):
         return False
     error = result.get("error")
     if not isinstance(error, str):
         return False
-    return error in {"timeout", "upstream_error", "upstream_rate_limited"}
+    return error in {
+        "timeout",
+        "upstream_error",
+        "upstream_rate_limited",
+        "rag_timeout",
+        "rag_unavailable",
+    }
 
 
 # ---------------------------------------------------------------------------

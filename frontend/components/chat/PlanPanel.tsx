@@ -1,6 +1,6 @@
 "use client";
 
-import type { TaskStep } from "@/lib/types";
+import { TOOL_LABELS, type TaskStep } from "@/lib/types";
 
 /** 状态 → 中文标签 */
 const STATUS_LABELS: Record<TaskStep["status"], string> = {
@@ -27,13 +27,6 @@ const TEXT_STYLES: Record<TaskStep["status"], string> = {
   done: "text-foreground",
   failed: "text-red-600 dark:text-red-400",
   skipped: "text-amber-600 dark:text-amber-400",
-};
-
-/** 工具名 → 中文显示名 */
-const TOOL_LABELS: Record<string, string> = {
-  get_weather: "查询天气",
-  web_search: "联网搜索",
-  calculate: "计算器",
 };
 
 /**
@@ -67,7 +60,9 @@ export function PlanPanel({ steps }: { steps: TaskStep[] }) {
                 <p className={TEXT_STYLES[step.status]}>
                   {step.description}
                   {toolLabel ? (
-                    <span className="ml-2 text-xs text-muted-foreground">
+                    /* 徽章而不是纯文字 —— 否则「文档检索」会跟描述混成一句，
+                       读起来像是描述的一部分 */
+                    <span className="ml-2 inline-block rounded-full border border-border px-1.5 py-px align-middle text-xs text-muted-foreground">
                       {toolLabel}
                     </span>
                   ) : null}

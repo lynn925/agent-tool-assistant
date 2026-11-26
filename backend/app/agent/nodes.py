@@ -40,6 +40,7 @@ TOOL_ARG_NAMES: dict[str, list[str]] = {
     "get_weather": ["city"],
     "web_search": ["query", "num"],
     "calculate": ["expression"],
+    "search_docs": ["query", "top_k", "doc_id"],
 }
 
 #: 常见的错误参数名 → 正确参数名
@@ -48,11 +49,17 @@ _ARG_ALIASES: dict[str, str] = {
     "place": "city",
     "city_name": "city",
     "keyword": "query",
+    "keywords": "query",
     "q": "query",
     "search": "query",
     "expr": "expression",
     "formula": "expression",
     "text": "expression",
+    "top": "top_k",
+    "limit": "top_k",
+    "n": "top_k",
+    "doc": "doc_id",
+    "document_id": "doc_id",
 }
 
 
@@ -294,7 +301,10 @@ async def executor_node(state: AgentState) -> dict:
     step = dict(plan[index])
     step["status"] = "running"
     plan[index] = step
-    writer({"event": "step", "step": step})
+    # 注意要传副本 —— writer 传出去的是引用，
+    # 后面改 step 的字段会同步改到已经发出去的那份，
+    # 消费端就看不到中间状态了（曾出现 running 被覆盖成 done）。
+    writer({"event": "step", "step": dict(step)})
 
     started = time.perf_counter()
     tool_name = step.get("tool")
@@ -305,7 +315,7 @@ async def executor_node(state: AgentState) -> dict:
         step["status"] = "done"
         step["result"] = None
         plan[index] = step
-        writer({"event": "step", "step": step})
+        writer({"event": "step", "step": dict(step)})
         return {"plan": plan, "current_step": index + 1}
 
     # 按计划调用工具
@@ -315,7 +325,7 @@ async def executor_node(state: AgentState) -> dict:
         step["status"] = "skipped"
         step["error"] = "unknown_tool"
         plan[index] = step
-        writer({"event": "step", "step": step})
+        writer({"event": "step", "step": dict(step)})
         return {"plan": plan, "current_step": index + 1}
 
     def _on_retry(retry_state) -> None:
@@ -363,7 +373,7 @@ async def executor_node(state: AgentState) -> dict:
             step["result"] = result
 
     plan[index] = step
-    writer({"event": "step", "step": step})
+    writer({"event": "step", "step": dict(step)})
     writer(
         {
             "event": "tool_result",
