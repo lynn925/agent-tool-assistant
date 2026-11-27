@@ -205,6 +205,19 @@ export async function listThreads(): Promise<{ threads: ThreadInfo[] }> {
   return request("/api/threads");
 }
 
+/**
+ * 删除一个会话，连同它的全部记忆。
+ *
+ * 与 clearMemory 的区别：
+ *   clearMemory  清空当前会话的消息，但会话本身还在列表里
+ *   deleteThread 整个会话从后端消失，列表里也没有了
+ */
+export async function deleteThread(threadId: string): Promise<{ thread_id: string; deleted: boolean }> {
+  return request(`/api/threads/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+  });
+}
+
 // ---------------------------------------------------------------------------
 // M6 模型列表
 // ---------------------------------------------------------------------------

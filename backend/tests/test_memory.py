@@ -87,6 +87,60 @@ def test_clear_memory_is_idempotent() -> None:
     assert r.json()["cleared"] is True
 
 
+def test_delete_thread_is_idempotent() -> None:
+    """删不存在的会话也不该报错 —— 前端可以放心重试。"""
+    r = client.delete("/api/threads/never-existed-xyz")
+    assert r.status_code == 200
+    assert r.json() == {"thread_id": "never-existed-xyz", "deleted": True}
+
+
+def test_delete_thread_removes_its_memory() -> None:
+    """删除会话后，它的记忆也查不到了。
+
+    先往某个会话写一条消息，再删掉它，最后确认记忆为空。
+    """
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    from app.agent.checkpointer import get_checkpointer
+
+    thread_id = "test-delete-thread-001"
+
+    async def _seed() -> None:
+        saver = await get_checkpointer()
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {"messages": [HumanMessage(content="待删除的消息")]}
+        await saver.aput(
+            {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": "",
+                    "checkpoint_id": checkpoint["id"],
+                }
+            },
+            checkpoint,
+            {},
+            {},
+        )
+
+    asyncio.run(_seed())
+
+    # 确认写进去了
+    r = client.get(f"/api/memory/{thread_id}")
+    assert len(r.json()["messages"]) == 1
+
+    # 删掉
+    r = client.delete(f"/api/threads/{thread_id}")
+    assert r.status_code == 200
+    assert r.json()["deleted"] is True
+
+    # 记忆没了
+    r = client.get(f"/api/memory/{thread_id}")
+    assert r.json()["messages"] == []
+
+
 def test_chat_requires_thread_id() -> None:
     """M4 起 thread_id 必传，缺失要返回 422。"""
     r = client.post("/api/chat", json={"message": "hi"})

@@ -24,8 +24,12 @@ interface ThreadSwitcherProps {
   onCreate: () => void;
   /** 清空当前会话 */
   onClear: () => void;
+  /** 删除某个会话（含后端记忆） */
+  onDelete: (threadId: string) => void;
   /** 是否正在处理（清空是异步的） */
   busy?: boolean;
+  /** 正在删除的会话 ID —— 用来禁用重复点击 */
+  deletingId?: string | null;
 }
 
 /**
@@ -42,7 +46,9 @@ export function ThreadSwitcher({
   onSwitch,
   onCreate,
   onClear,
+  onDelete,
   busy = false,
+  deletingId = null,
 }: ThreadSwitcherProps) {
   /** 显示名称：用户命名过就用名字，否则用短 ID */
   function displayName(thread: LocalThread): string {
@@ -87,6 +93,25 @@ export function ThreadSwitcher({
               </DropdownMenuItem>
             ))
           )}
+          {threads.length > 0 ? (
+            <>
+              <DropdownMenuSeparator />
+              {/*
+                删除入口放在列表底部，而不是每个会话后面。
+                原因：菜单项支持嵌套子菜单，但把删除按钮塞进每一项
+                会让"点击切换"和"点击删除"两个热区挨得太近，容易误触。
+                这里统一在底部删当前会话，语义更清楚。
+              */}
+              <DropdownMenuItem
+                variant="destructive"
+                disabled={!current || deletingId !== null}
+                onSelect={() => current && onDelete(current.thread_id)}
+              >
+                <Trash2 />
+                {deletingId ? "删除中…" : "删除当前会话"}
+              </DropdownMenuItem>
+            </>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
 

@@ -1,5 +1,9 @@
 # AI Agent 工具调用助手
 
+![多步任务编排演示](docs/demo.gif)
+
+> 演示：用户提问「内部文档里三方施工统计分析描述了哪些内容？」→ planner 生成执行计划 → search_docs 工具检索自建知识库 → 归纳生成带依据的回答。完整评测脚本见 [metrics_toolkit/](metrics_toolkit/)。
+
 渐进式 AI Agent 项目，6 个里程碑逐步搭建：
 
 | M | 目标 | 状态 |
@@ -105,8 +109,9 @@ SqliteSaver 读写 data/checkpoints.db
 |---|---|---|
 | POST | `/api/chat` | `thread_id` 必传 |
 | GET | `/api/memory/{thread_id}` | 读取会话历史消息 |
-| DELETE | `/api/memory/{thread_id}` | 清空会话记忆 |
+| DELETE | `/api/memory/{thread_id}` | 清空会话记忆（会话本身保留） |
 | GET | `/api/threads` | 列出所有会话 |
+| DELETE | `/api/threads/{thread_id}` | 删除会话（后端记忆一并清除） |
 | GET | `/api/models` | 列出 provider 与可用模型（M6） |
 
 ### 工具契约

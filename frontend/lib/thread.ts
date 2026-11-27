@@ -115,9 +115,30 @@ export function touchThread(threadId: string, name?: string): void {
   window.localStorage.setItem(LIST_KEY, JSON.stringify(list));
 }
 
-/** 从本地列表移除会话（不删后端记忆） */
+/**
+ * 从本地列表移除会话。
+ *
+ * 注意：**只删前端元信息，不删后端记忆** ——
+ * 后端的删除走 DELETE /api/threads/{id}，那是另一个操作。
+ */
 export function removeThread(threadId: string): void {
   if (!isBrowser()) return;
   const list = listLocalThreads().filter((t) => t.thread_id !== threadId);
   window.localStorage.setItem(LIST_KEY, JSON.stringify(list));
+}
+
+/**
+ * 删除会话的**全部**本地痕迹 —— 列表项 + 用户命名。
+ *
+ * 之前 removeThread 只清列表，名称表里会留下孤儿 key。
+ */
+export function forgetThread(threadId: string): void {
+  if (!isBrowser()) return;
+  removeThread(threadId);
+
+  const names = readNames();
+  if (threadId in names) {
+    delete names[threadId];
+    window.localStorage.setItem(NAMES_KEY, JSON.stringify(names));
+  }
 }

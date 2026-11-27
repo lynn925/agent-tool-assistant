@@ -13,11 +13,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { chatStream, clearMemory, getMemory } from "@/lib/api";
+import { chatStream, clearMemory, deleteThread, getMemory } from "@/lib/api";
 import { getSettings, saveSettings } from "@/lib/settings";
 import {
   type LocalThread,
   createThread,
+  forgetThread,
   getThreadId,
   listLocalThreads,
   setThreadId,
@@ -68,6 +69,8 @@ export default function HomePage() {
   const [clearing, setClearing] = useState(false);
   /** M5：当前正在重试的提示 */
   const [retrying, setRetrying] = useState<RetryingState | null>(null);
+  /** 正在删除的会话 ID —— 用来禁用重复点击 */
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   /** M6：聊天区的 viewport 元素，用于自动滚动 */
   const viewportRef = useRef<HTMLDivElement | null>(null);
   /** M6：用户是否手动往上滚了 —— 手动滚动后就不该再自动往下拽 */
@@ -400,6 +403,44 @@ export default function HomePage() {
     }
   }
 
+  /**
+   * 删除一个会话 —— 连同后端存的全部记忆一起删掉。
+   *
+   * 删掉的是**当前会话**时，必须立刻新建一个。
+   * 否则 threadId 会指向一个已经不存在的会话：
+   * 下一次发消息时后端会把它当成新会话重建，
+   * 但本地列表里已经没有它了 —— 界面上就会出现一个"幽灵会话"。
+   */
+  async function onDelete(id: string) {
+    // 删不存在的会话没什么意义，直接忽略
+    if (!id) return;
+    // 删除是不可撤销的，确认一下
+    if (!window.confirm("删除这个会话？该会话的全部对话记录都会被清空，且无法恢复。")) {
+      return;
+    }
+
+    setDeletingId(id);
+    setError(null);
+    try {
+      await deleteThread(id);
+      // 后端删干净了，前端的元信息也一起清掉（列表项 + 用户命名）
+      forgetThread(id);
+
+      if (id === threadId) {
+        // 删的是当前会话 —— 新建一个顶上，并把消息区清空
+        const next = createThread();
+        setThreadIdState(next);
+        setMessages([]);
+      }
+      setThreads(listLocalThreads());
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(`删除失败：${msg}`);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <main className="mx-auto flex h-dvh w-full max-w-3xl flex-col gap-4 overflow-hidden px-4 py-6">
       <header className="flex shrink-0 flex-col gap-3">
@@ -430,7 +471,9 @@ export default function HomePage() {
           onSwitch={onSwitch}
           onCreate={onCreate}
           onClear={onClear}
+          onDelete={onDelete}
           busy={clearing}
+          deletingId={deletingId}
         />
       </header>
 

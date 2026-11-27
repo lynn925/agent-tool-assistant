@@ -1,7 +1,8 @@
 """M4 会话列表接口 —— 列出所有 thread 及其最后活跃时间。
 
 对应 PLAN.md §6.2：
-  GET /api/threads   返回所有 thread + 最后活跃时间
+  GET    /api/threads          列出所有 thread + 最后活跃时间
+  DELETE /api/threads/{id}     删除一个会话（连同它的全部记忆）
 """
 
 from fastapi import APIRouter
@@ -54,3 +55,17 @@ async def list_threads() -> dict:
         )
 
     return {"threads": [t.model_dump() for t in threads]}
+
+
+@router.delete("/threads/{thread_id}")
+async def delete_thread(thread_id: str) -> dict:
+    """删除一个会话，连同它的全部记忆。
+
+    adelete_thread 会同时删掉 checkpoints 和 writes 两张表里的记录，
+    所以这个会话的所有历史消息和中间状态都不留。
+
+    删不存在的会话不报错 —— 幂等，前端可以放心重试。
+    """
+    saver = await get_checkpointer()
+    await saver.adelete_thread(thread_id)
+    return {"thread_id": thread_id, "deleted": True}
